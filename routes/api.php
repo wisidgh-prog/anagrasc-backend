@@ -122,7 +122,6 @@ Route::middleware(['auth:sanctum', \App\Http\Middleware\CheckRole::class . ':sup
     Route::post('/utilisateurs/{user}/rejeter', [AdminController::class, 'rejeterCompte']);
     Route::post('/utilisateurs/{user}/suspendre', [AdminController::class, 'suspendreCompte']);
     Route::post('/utilisateurs/interne', [AdminController::class, 'creerCompteInterne']);
-
 //Route pour le controlle des pieces
     Route::get('/pieces/{user}', [PieceController::class, 'show']);
     Route::get('/logs', [LogController::class, 'index']);
@@ -138,4 +137,12 @@ Route::middleware(['auth:sanctum', \App\Http\Middleware\CheckRole::class . ':sup
     Route::put('/roles/{role}', [RoleController::class, 'update']);
     Route::delete('/roles/{role}', [RoleController::class, 'destroy']);
     Route::post('/roles/{role}/permissions', [RoleController::class, 'syncPermissions']);
- });
+//Route pour voir les pieces
+Route::get('/utilisateurs/{user}/piece/recto', [PieceController::class, 'afficherRecto']);
+Route::get('/utilisateurs/{user}/piece/verso', [PieceController::class, 'afficherVerso']);
+//Route pour la validation de bien
+ Route::get('/biens', [BienController::class, 'indexAdmin']);
+Route::post('/biens/{bien}/valider', [BienController::class, 'valider']);
+Route::post('/biens/{bien}/rejeter', [BienController::class, 'rejeter']);
+});
+

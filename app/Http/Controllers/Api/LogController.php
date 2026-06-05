@@ -77,7 +77,7 @@ public function export(Request $request)
     $logs = $query->limit(1000)->get();
 
     // Générer le PDF avec une vue Blade
-    $pdf = Pdf::loadView('logs.pdf', compact('logs'));
+    $pdf = Pdf::loadView('Log.pdf', compact('logs'));
 
     // Télécharger le fichier
     return $pdf->download('logs_anagrasc.pdf');

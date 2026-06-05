@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\AppLog;
 use App\Models\Configuration;
 use Illuminate\Http\Request;
 
@@ -11,8 +12,7 @@ class ConfigurationController extends Controller
     /**
      * GET /api/configurations
      * auth:sanctum + role:administrateur
-     *
-     * Liste des paramètres de configuration.
+     * Liste de tous les paramètres de configuration du système.
      */
     public function index()
     {
@@ -26,21 +26,26 @@ class ConfigurationController extends Controller
     /**
      * PUT /api/configurations/{configuration}
      * auth:sanctum + role:administrateur
-     *
-     * Modifie la valeur d'un paramètre système (CDC Scénario 7).
+     * Modifier la valeur d'un paramètre système (CDC Scénario 7).
      */
     public function update(Request $request, Configuration $configuration)
     {
-        $validated = $request->validate([
+        $request->validate([
             'valeur' => 'required|string|max:191',
         ]);
 
+        // On garde l'ancienne valeur pour l'enregistrer dans les logs
         $ancienneValeur = $configuration->valeur;
-        $configuration->update(['valeur' => $validated['valeur']]);
 
-        // Journalisation de la modification (utilisation du LogService via injection
-        // si disponible, sinon un simple log applicatif)
-        \Log::info("Configuration modifiée : {$configuration->cle} changée de {$ancienneValeur} à {$validated['valeur']}");
+        $configuration->update(['valeur' => $request->valeur]);
+
+        // Enregistrer la modification dans les logs
+        AppLog::create([
+            'user_id'     => $request->user()->id,
+            'action'      => 'modification_configuration',
+            'description' => "Configuration '{$configuration->cle}' modifiée : {$ancienneValeur} → {$request->valeur}",
+            'horodatage'  => now(),
+        ]);
 
         return response()->json([
             'message' => 'Paramètre mis à jour.',

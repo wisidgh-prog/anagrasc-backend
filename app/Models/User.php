@@ -41,6 +41,8 @@ class User extends Authenticatable
         'est_suspendu',
         'valide_le',
         'valide_par',
+        'piece_recto_url',   // Accès sécurisé uniquement via route dédiée
+        'piece_verso_url',
     ];
 
     /**
@@ -49,8 +51,7 @@ class User extends Authenticatable
     protected $hidden = [
         'password',
         'remember_token',
-        'piece_recto_url',   // Accès sécurisé uniquement via route dédiée
-        'piece_verso_url',
+
     ];
 
     /**
@@ -66,6 +67,7 @@ class User extends Authenticatable
     ];
 
      protected $appends = ['nom_complet'];
+
     /*
     |--------------------------------------------------------------------------
     | Relations

@@ -3,88 +3,83 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\AppLog;
 use App\Models\Offre;
 use App\Models\SessionEnchere;
-use App\Models\Encherisseur;
 use App\Services\WalletService;
 use Illuminate\Http\Request;
-use App\Http\Controllers\Api\LogController;
+
 class OffreController extends Controller
 {
-    public function __construct(
-        private WalletService $walletService
-    ) {}
-
-    /*
-    |--------------------------------------------------------------------------
-    | Consultation publique
-    |--------------------------------------------------------------------------
-    */
+    // Le WalletService est injecté automatiquement par Laravel (injection de dépendances)
+    // On en a besoin pour prélever la caution lors de la première offre
+    public function __construct(private WalletService $walletService) {}
 
     /**
      * GET /api/sessions/{session}/offres
-     * Public – Polling toutes les 3 secondes.
-     * Retourne l'historique des offres + la meilleure offre et le timer.
+     * Public – Retourne les offres d'une session pour le polling Angular (toutes les 3 secondes).
      */
     public function index(SessionEnchere $session)
     {
+        // Récupérer les 20 meilleures offres en masquant l'identité des enchérisseurs
+        $offres = $session->offres()
+            ->select('montant', 'id_anonyme', 'created_at')
+            ->orderByDesc('montant')
+            ->limit(20)
+            ->get();
+
+        // Formater les offres pour l'affichage
+        $offresFormatees = [];
+        foreach ($offres as $offre) {
+            $offresFormatees[] = [
+                'montant'    => (float) $offre->montant,
+                'id_anonyme' => $offre->id_anonyme,
+                'heure'      => $offre->created_at->format('H:i:s'),
+            ];
+        }
+
         return response()->json([
             'data' => [
-                'statut'                     => $session->statut,
-                'offres'                     => $session->offres()
-                    ->select('montant', 'id_anonyme', 'created_at')
-                    ->orderByDesc('montant')
-                    ->limit(20)
-                    ->get()
-                    ->map(fn($o) => [
-                        'montant'    => (float) $o->montant,
-                        'id_anonyme' => $o->id_anonyme,
-                        'heure'      => $o->created_at->format('H:i:s'),
-                    ]),
-                'meilleure_offre'            => (float) ($session->meilleure_offre?->montant ?? 0),
-                'id_meilleur'                => $session->meilleure_offre?->id_anonyme ?? null,
-                'secondes_restantes'         => $session->secondes_restantes,
-                'mise_a_prix_effective'      => (float) $session->mise_a_prix_effective,
-                'montant_min_surenchere'     => (float) $session->montant_min_surenchere,
+                'statut'                 => $session->statut,
+                'offres'                 => $offresFormatees,
+                'meilleure_offre'        => (float) ($session->meilleure_offre?->montant ?? 0),
+                'id_meilleur'            => $session->meilleure_offre?->id_anonyme ?? null,
+                'secondes_restantes'     => $session->secondes_restantes,
+                'mise_a_prix_effective'  => (float) $session->mise_a_prix_effective,
+                'montant_min_surenchere' => (float) $session->montant_min_surenchere,
             ],
         ]);
     }
 
-    /*
-    |--------------------------------------------------------------------------
-    | Enchérisseur (connecté, valide)
-    |--------------------------------------------------------------------------
-    */
-
     /**
      * POST /api/sessions/{session}/offrir
-     * auth:sanctum + role:encherisseur + encherisseur.valide
-     * Placer une offre. Applique les règles :
-     * - Session active
-     * - Solde suffisant (caution)
-     * - Vérification prix de réserve
-     * - Surenchère minimum
-     * - Génération de l'ID anonyme
+     * auth:sanctum + role:encherisseur (validé)
+     * Placer une offre sur une session active (CDC Scénario 3).
      */
     public function store(Request $request, SessionEnchere $session)
     {
-        // Vérifier que la session est bien en cours
+        // 1. Vérifier que la session est bien active
         if (!$session->estActive()) {
             return response()->json(['message' => 'Les offres ne sont pas acceptées pour cette session.'], 422);
         }
 
-        $user = $request->user();
+        // 2. Récupérer le profil enchérisseur de l'utilisateur connecté
+        $user         = $request->user();
         $encherisseur = $user->encherisseur;
+
         if (!$encherisseur) {
             return response()->json(['message' => 'Profil enchérisseur introuvable.'], 403);
         }
 
-        $validated = $request->validate([
+        // 3. Valider le montant envoyé
+        $request->validate([
             'montant' => 'required|numeric|min:0',
         ]);
-        $montant = (float) $validated['montant'];
 
-        // Montant minimum = max(meilleure offre actuelle, mise à prix) + sur enchère minimum
+        $montant = (float) $request->montant;
+
+        // 4. Calculer le montant minimum accepté
+        // Règle : max(meilleure offre actuelle, mise à prix) + surenchère minimum
         $meilleureActuelle = (float) ($session->meilleure_offre?->montant ?? 0);
         $miseAPrix         = (float) $session->mise_a_prix_effective;
         $surenchereMin     = (float) $session->montant_min_surenchere;
@@ -96,49 +91,46 @@ class OffreController extends Controller
             ], 422);
         }
 
-        // Vérification du prix de réserve
-        $prixReserve = (float) ($session->prix_reserve ?? 0);
-        if ($prixReserve > 0 && $montant < $prixReserve) {
-            $offreMax = (float) ($session->meilleure_offre?->montant ?? 0);
-            if ($offreMax < $prixReserve) {
-                return response()->json([
-                    'message' => 'Le montant doit être supérieur ou égal au prix de réserve confidentiel.',
-                ], 422);
-            }
-        }
-
-        // Vérification du solde : caution requise
+        // 5. Vérifier que le solde du wallet est suffisant pour payer la caution
         $caution = $session->getCautionRequise();
+
         if (!$encherisseur->wallet || !$encherisseur->wallet->soldeSuffisant($caution)) {
             return response()->json([
                 'message' => "Solde insuffisant. La caution requise est de {$caution} FCFA.",
             ], 422);
         }
 
-        // Prélèvement de la caution (une seule fois par session)
-        $offreExistante = Offre::where('session_id', $session->id)
+        // 6. Prélever la caution seulement si c'est la première offre de cet enchérisseur sur cette session
+        $dejaParticipe = Offre::where('session_id', $session->id)
             ->where('encherisseur_id', $encherisseur->id)
             ->exists();
-        if (!$offreExistante) {
+
+        if (!$dejaParticipe) {
             $debite = $this->walletService->debiter(
                 $encherisseur,
                 $caution,
                 'prelevement_caution',
                 $session->id
             );
+
             if (!$debite) {
                 return response()->json(['message' => 'Erreur lors du prélèvement de la caution.'], 500);
             }
         }
 
-        // Génération de l'ID anonyme (seulement pour la première offre)
-        $idAnonyme = $offreExistante
-            ? Offre::where('session_id', $session->id)
-                  ->where('encherisseur_id', $encherisseur->id)
-                  ->value('id_anonyme')
-            : Offre::genererIdAnonyme($session->id);
+        // 7. Récupérer ou générer l'ID anonyme
+        // Chaque enchérisseur garde le même ID anonyme pour toute la session (ex: ENCH-001)
+        if ($dejaParticipe) {
+            // Récupérer l'ID anonyme déjà attribué
+            $idAnonyme = Offre::where('session_id', $session->id)
+                ->where('encherisseur_id', $encherisseur->id)
+                ->value('id_anonyme');
+        } else {
+            // Générer un nouvel ID anonyme séquentiel
+            $idAnonyme = Offre::genererIdAnonyme($session->id);
+        }
 
-        // Créer l'offre
+        // 8. Créer l'offre
         $offre = Offre::create([
             'session_id'      => $session->id,
             'encherisseur_id' => $encherisseur->id,
@@ -147,11 +139,14 @@ class OffreController extends Controller
             'est_gagnante'    => false,
         ]);
 
-        //Log de l'offre placée
-          LogController::log(
-                'offre',
-                "Offre de {$offre->montant} FCFA placée par {$offre->id_anonyme} sur la session #{$session->id}"
-            );
+        // Enregistrer l'action dans les logs
+        AppLog::create([
+            'user_id'     => $user->id,
+            'action'      => 'offre',
+            'description' => "Offre de {$offre->montant} FCFA placée par {$offre->id_anonyme} sur la session #{$session->id}",
+            'horodatage'  => now(),
+        ]);
+
         return response()->json([
             'message'    => 'Offre enregistrée.',
             'id_anonyme' => $idAnonyme,
@@ -161,71 +156,104 @@ class OffreController extends Controller
 
     /**
      * GET /api/mes-participations
-     * auth:sanctum + role:encherisseur + encherisseur.valide
-     * Liste des sessions auxquelles l'enchérisseur a participé.
+     * auth:sanctum + role:encherisseur (validé)
+     * Historique de toutes les sessions auxquelles l'enchérisseur a participé.
      */
     public function mesParticipations(Request $request)
     {
         $encherisseur = $request->user()->encherisseur;
+
         if (!$encherisseur) {
             return response()->json(['message' => 'Profil enchérisseur introuvable.'], 403);
         }
 
-        $participations = Offre::with([
-                'session' => fn($q) => $q->select('id', 'bien_id', 'date_fin', 'statut'),
-                'session.bien' => fn($q) => $q->select('id', 'titre'),
+        // Récupérer toutes les offres de cet enchérisseur avec les infos de session et de bien
+        $toutesLesOffres = Offre::with([
+                'session:id,bien_id,date_fin,statut',
+                'session.bien:id,titre',
             ])
             ->where('encherisseur_id', $encherisseur->id)
             ->orderByDesc('created_at')
-            ->get()
-            ->groupBy('session_id')
-            ->map(fn($offres, $sessionId) => [
-                'session_id'         => $sessionId,
-                'bien'               => $offres->first()->session->bien->titre ?? '',
-                'statut'             => $offres->first()->session->statut ?? '',
-                'ma_meilleure_offre' => (float) $offres->max('montant'),
-                'date_derniere'      => $offres->max('created_at')->toDateTimeString(),
-            ])
-            ->values();
+            ->get();
+
+        // Regrouper par session pour n'afficher qu'une ligne par session
+        $participations = [];
+        $sessionsVues   = [];
+
+        foreach ($toutesLesOffres as $offre) {
+            $sessionId = $offre->session_id;
+
+            // On n'ajoute chaque session qu'une seule fois
+            if (!in_array($sessionId, $sessionsVues)) {
+                $sessionsVues[] = $sessionId;
+
+                // Trouver la meilleure offre de cet enchérisseur pour cette session
+                $meilleureOffre = $toutesLesOffres
+                    ->where('session_id', $sessionId)
+                    ->max('montant');
+
+                $participations[] = [
+                    'session_id'         => $sessionId,
+                    'bien'               => $offre->session->bien->titre ?? '',
+                    'statut'             => $offre->session->statut ?? '',
+                    'ma_meilleure_offre' => (float) $meilleureOffre,
+                ];
+            }
+        }
 
         return response()->json(['data' => $participations]);
     }
 
     /**
      * GET /api/mes-offres-en-cours
-     * auth:sanctum + role:encherisseur + encherisseur.valide
-     * Sessions actives où l'enchérisseur a placé au moins une offre.
+     * auth:sanctum + role:encherisseur (validé)
+     * Sessions actuellement en cours où l'enchérisseur a placé au moins une offre.
      */
     public function offresEnCours(Request $request)
     {
         $encherisseur = $request->user()->encherisseur;
+
         if (!$encherisseur) {
             return response()->json(['message' => 'Profil enchérisseur introuvable.'], 403);
         }
 
+        // Récupérer les offres de cet enchérisseur dans des sessions actives
         $offresActives = Offre::with([
-                'session' => fn($q) => $q->whereIn('statut', [
-                    SessionEnchere::STATUT_EN_COURS,
-                ])->select('id', 'bien_id', 'date_fin', 'mise_a_prix_effective', 'statut'),
-                'session.bien' => fn($q) => $q->select('id', 'titre'),
+                'session:id,bien_id,date_fin,mise_a_prix_effective,statut',
+                'session.bien:id,titre',
             ])
             ->where('encherisseur_id', $encherisseur->id)
-            ->whereHas('session', fn($q) => $q->where('statut', SessionEnchere::STATUT_EN_COURS))
+            ->whereHas('session', function ($q) {
+                $q->where('statut', SessionEnchere::STATUT_EN_COURS);
+            })
             ->orderByDesc('created_at')
-            ->get()
-            ->groupBy('session_id')
-            ->map(fn($offres, $sessionId) => [
-                'session_id'           => $sessionId,
-                'bien'                 => $offres->first()->session->bien->titre ?? '',
-                'mise_a_prix'          => (float) ($offres->first()->session->mise_a_prix_effective ?? 0),
-                'ma_meilleure_offre'   => (float) $offres->max('montant'),
-                'secondes_restantes'   => $offres->first()->session->secondes_restantes,
-                'id_anonyme'           => $offres->first()->id_anonyme,
-            ])
-            ->values();
+            ->get();
 
-        return response()->json(['data' => $offresActives]);
+        // Regrouper par session
+        $resultat     = [];
+        $sessionsVues = [];
+
+        foreach ($offresActives as $offre) {
+            $sessionId = $offre->session_id;
+
+            if (!in_array($sessionId, $sessionsVues)) {
+                $sessionsVues[] = $sessionId;
+
+                $meilleureOffre = $offresActives
+                    ->where('session_id', $sessionId)
+                    ->max('montant');
+
+                $resultat[] = [
+                    'session_id'           => $sessionId,
+                    'bien'                 => $offre->session->bien->titre ?? '',
+                    'mise_a_prix'          => (float) ($offre->session->mise_a_prix_effective ?? 0),
+                    'ma_meilleure_offre'   => (float) $meilleureOffre,
+                    'secondes_restantes'   => $offre->session->secondes_restantes,
+                    'id_anonyme'           => $offre->id_anonyme,
+                ];
+            }
+        }
+
+        return response()->json(['data' => $resultat]);
     }
 }
-
-

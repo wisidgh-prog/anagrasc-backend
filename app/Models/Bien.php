@@ -18,11 +18,12 @@ class Bien extends Model
     | Correction appliquée : suppression du statut 'en_attente_validation'.
     | Le commissaire publie directement avec le statut 'publie'.
     */
+    public const STATUT_EN_ATTENTE_VALIDATION = 'en_attente_validation'; // En attente de validation
     public const STATUT_PUBLIE   = 'publie';      // Visible en catalogue
     public const STATUT_EN_COURS = 'en_cours';    // Enchère active
     public const STATUT_VENDU    = 'vendu';       // Adjugé et payé
     public const STATUT_ANNULE   = 'annule';      // Retiré de la vente
-
+    public const STATUT_REJETE   = 'rejete';      // Refusé lors de validation
     /*
     |--------------------------------------------------------------------------
     | Attributs assignables en masse
@@ -38,6 +39,8 @@ class Bien extends Model
         'horaires_visite',
         'remarques',
         'statut',
+        'motif_rejet',
+        'date_rejet',
     ];
 
     /*
@@ -47,6 +50,7 @@ class Bien extends Model
     */
     protected $casts = [
         'mise_a_prix' => 'decimal:2',
+        'date_rejet'  => 'datetime',
     ];
 
     /*
@@ -98,7 +102,11 @@ class Bien extends Model
      */
     public function estModifiable(): bool
     {
-        return !in_array($this->statut, [self::STATUT_EN_COURS, self::STATUT_VENDU]);
+        return !in_array($this->statut, [
+            self::STATUT_EN_ATTENTE_VALIDATION,
+            self::STATUT_REJETE,
+             
+             ]);
     }
 
     /**

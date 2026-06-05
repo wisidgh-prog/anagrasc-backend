@@ -3,79 +3,92 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
-use App\Models\SessionEnchere;
+use App\Models\AppLog;
 use App\Models\Bien;
+use App\Models\SessionEnchere;
 use Illuminate\Http\Request;
-use App\Http\Controllers\Api\LogController;
+
 class SessionEnchereController extends Controller
 {
-    /*
-    |--------------------------------------------------------------------------
-    | Consultation publique
-    |--------------------------------------------------------------------------
-    */
-
     /**
      * GET /api/ventes-passees
-     * Public – Historique des enchères terminées (paginé, filtrable).
+     * Public – Historique paginé des enchères terminées.
      */
     public function historique(Request $request)
     {
-        $sessions = SessionEnchere::where('statut', SessionEnchere::STATUT_TERMINEE)
+        $query = SessionEnchere::where('statut', SessionEnchere::STATUT_TERMINEE)
             ->with([
-                'bien' => fn($q) => $q->select('id', 'titre', 'categorie_id'),
+                'bien:id,titre,categorie_id',
                 'bien.categorie:id,libelle',
-                'offreGagnante' => fn($q) => $q->select('id', 'session_id', 'montant', 'id_anonyme'),
+                'offreGagnante:id,session_id,montant,id_anonyme',
             ])
-            ->when($request->categorie_id, fn($q, $id) =>
-                $q->whereHas('bien', fn($b) => $b->where('categorie_id', $id))
-            )
-            ->when($request->date_debut, fn($q, $d) => $q->whereDate('date_fin', '>=', $d))
-            ->when($request->date_fin, fn($q, $d) => $q->whereDate('date_fin', '<=', $d))
-            ->orderByDesc('date_fin')
-            ->paginate(15);
+            ->orderByDesc('date_fin');
+
+        // Filtre par catégorie
+        if ($request->filled('categorie_id')) {
+            $categorieId = $request->categorie_id;
+            $query->whereHas('bien', function ($q) use ($categorieId) {
+                $q->where('categorie_id', $categorieId);
+            });
+        }
+
+        // Filtre par date de début
+        if ($request->filled('date_debut')) {
+            $query->whereDate('date_fin', '>=', $request->date_debut);
+        }
+
+        // Filtre par date de fin
+        if ($request->filled('date_fin')) {
+            $query->whereDate('date_fin', '<=', $request->date_fin);
+        }
+
+        $sessions = $query->paginate(15);
 
         return response()->json($sessions);
     }
 
     /**
      * GET /api/sessions/{session}
-     * Public – Détail d'une session (timer, meilleure offre, anonymat).
-     * Le prix de réserve est automatiquement masqué par le modèle.
+     * Public – Détail d'une session avec timer et historique des offres.
+     * Le prix de réserve est masqué automatiquement par le modèle.
      */
     public function show(SessionEnchere $session)
     {
         $session->load([
-            'bien' => fn($q) => $q->with('categorie', 'photos'),
-            'offres' => fn($q) => $q->orderByDesc('montant')->limit(20),
+            'bien.categorie',
+            'bien.photos',
+            'offres' => function ($q) {
+                $q->orderByDesc('montant')->limit(20);
+            },
         ]);
+
+        // Formater les offres pour masquer l'identité des enchérisseurs
+        $offresFormatees = [];
+        foreach ($session->offres as $offre) {
+            $offresFormatees[] = [
+                'montant'    => $offre->montant,
+                'id_anonyme' => $offre->id_anonyme,
+                'heure'      => $offre->created_at->format('H:i:s'),
+            ];
+        }
 
         return response()->json([
             'data' => [
-                'id'                      => $session->id,
-                'bien'                    => $session->bien,
-                'statut'                  => $session->statut,
-                'date_debut'              => $session->date_debut,
-                'date_fin'                => $session->date_fin,
-                'mise_a_prix_effective'   => $session->mise_a_prix_effective,
-                'montant_min_surenchere'  => $session->montant_min_surenchere,
-                'meilleure_offre'         => $session->meilleure_offre?->montant ?? 0,
-                'id_meilleur'             => $session->meilleure_offre?->id_anonyme ?? null,
-                'secondes_restantes'      => $session->secondes_restantes,
-                'offres'                  => $session->offres->map(fn($o) => [
-                    'montant'    => $o->montant,
-                    'id_anonyme' => $o->id_anonyme,
-                    'heure'      => $o->created_at->format('H:i:s'),
-                ]),
+                'id'                     => $session->id,
+                'bien'                   => $session->bien,
+                'statut'                 => $session->statut,
+                'date_debut'             => $session->date_debut,
+                'date_fin'               => $session->date_fin,
+                'mise_a_prix_effective'  => $session->mise_a_prix_effective,
+                'montant_min_surenchere' => $session->montant_min_surenchere,
+                // prix_reserve intentionnellement absent — confidentiel
+                'meilleure_offre'        => $session->meilleure_offre?->montant ?? 0,
+                'id_meilleur'            => $session->meilleure_offre?->id_anonyme ?? null,
+                'secondes_restantes'     => $session->secondes_restantes,
+                'offres'                 => $offresFormatees,
             ],
         ]);
     }
-
-    /*
-    |--------------------------------------------------------------------------
-    | Commissaire-priseur
-    |--------------------------------------------------------------------------
-    */
 
     /**
      * GET /api/commissaire/sessions
@@ -95,22 +108,22 @@ class SessionEnchereController extends Controller
     /**
      * POST /api/sessions
      * auth:sanctum + role:commissaire_priseur
-     * Création d'une session d'enchère.
+     * Créer une nouvelle session d'enchère.
      */
     public function store(Request $request)
     {
-        $validated = $request->validate([
-            'bien_id'                 => 'required|exists:biens,id',
-            'superviseur_id'          => 'nullable|exists:users,id',
-            'date_debut'              => 'required|date|after:now',
-            'date_fin'                => 'required|date|after:date_debut',
-            'mise_a_prix_effective'   => 'required|numeric|min:0',
-            'montant_min_surenchere'  => 'required|numeric|min:1',
-            'prix_reserve'            => 'nullable|numeric|min:0',
+        $request->validate([
+            'bien_id'                => 'required|exists:biens,id',
+            'superviseur_id'         => 'nullable|exists:users,id',
+            'date_debut'             => 'required|date|after:now',
+            'date_fin'               => 'required|date|after:date_debut',
+            'mise_a_prix_effective'  => 'required|numeric|min:0',
+            'montant_min_surenchere' => 'required|numeric|min:1',
+            'prix_reserve'           => 'nullable|numeric|min:0',
         ]);
 
-        // Vérifier que le bien est publié et appartient au commissaire
-        $bien = Bien::where('id', $validated['bien_id'])
+        // Vérifier que le bien est publié et appartient bien à ce commissaire
+        $bien = Bien::where('id', $request->bien_id)
             ->where('cree_par', $request->user()->id)
             ->where('statut', Bien::STATUT_PUBLIE)
             ->first();
@@ -120,15 +133,25 @@ class SessionEnchereController extends Controller
         }
 
         $session = SessionEnchere::create([
-            ...$validated,
-            'commissaire_id' => $request->user()->id,
-            'statut'         => SessionEnchere::STATUT_A_VENIR,
+            'bien_id'                => $request->bien_id,
+            'superviseur_id'         => $request->superviseur_id,
+            'commissaire_id'         => $request->user()->id,
+            'date_debut'             => $request->date_debut,
+            'date_fin'               => $request->date_fin,
+            'mise_a_prix_effective'  => $request->mise_a_prix_effective,
+            'montant_min_surenchere' => $request->montant_min_surenchere,
+            'prix_reserve'           => $request->prix_reserve,
+            'statut'                 => SessionEnchere::STATUT_A_VENIR,
         ]);
-        //log de création de session d'enchère
-         LogController::log(
-          'creation_session',
-          "Session #{$session->id} créée pour le bien #{$request->bien_id}"
-);
+
+        // Enregistrer l'action dans les logs
+        AppLog::create([
+            'user_id'     => $request->user()->id,
+            'action'      => 'creation_session',
+            'description' => "Session #{$session->id} créée pour le bien #{$request->bien_id}",
+            'horodatage'  => now(),
+        ]);
+
         return response()->json([
             'message' => 'Session créée.',
             'data'    => $session->load('bien'),
@@ -138,33 +161,45 @@ class SessionEnchereController extends Controller
     /**
      * PUT /api/sessions/{session}
      * auth:sanctum + role:commissaire_priseur
-     * Modification d'une session avant son démarrage.
+     * Modifier une session (seulement si elle n'a pas encore démarré).
      */
     public function update(Request $request, SessionEnchere $session)
     {
+        // Seul le commissaire qui a créé la session peut la modifier
         if ($session->commissaire_id !== $request->user()->id) {
             return response()->json(['message' => 'Action non autorisée.'], 403);
         }
 
+        // On ne peut modifier que les sessions pas encore démarrées
         if ($session->statut !== SessionEnchere::STATUT_A_VENIR) {
             return response()->json(['message' => 'La session ne peut plus être modifiée.'], 422);
         }
 
-        $validated = $request->validate([
-            'superviseur_id'          => 'nullable|exists:users,id',
-            'date_debut'              => 'sometimes|date|after:now',
-            'date_fin'                => 'sometimes|date|after:date_debut',
-            'mise_a_prix_effective'   => 'sometimes|numeric|min:0',
-            'montant_min_surenchere'  => 'sometimes|numeric|min:1',
-            'prix_reserve'            => 'nullable|numeric|min:0',
+        $request->validate([
+            'superviseur_id'         => 'nullable|exists:users,id',
+            'date_debut'             => 'sometimes|date|after:now',
+            'date_fin'               => 'sometimes|date|after:date_debut',
+            'mise_a_prix_effective'  => 'sometimes|numeric|min:0',
+            'montant_min_surenchere' => 'sometimes|numeric|min:1',
+            'prix_reserve'           => 'nullable|numeric|min:0',
         ]);
 
-        $session->update($validated);
-        //log de modification de session d'enchère
-         LogController::log(
-          'modification_session',
-          "Session #{$session->id} modifiée"
-             );
+        $session->update([
+            'superviseur_id'         => $request->superviseur_id ?? $session->superviseur_id,
+            'date_debut'             => $request->date_debut ?? $session->date_debut,
+            'date_fin'               => $request->date_fin ?? $session->date_fin,
+            'mise_a_prix_effective'  => $request->mise_a_prix_effective ?? $session->mise_a_prix_effective,
+            'montant_min_surenchere' => $request->montant_min_surenchere ?? $session->montant_min_surenchere,
+            'prix_reserve'           => $request->prix_reserve ?? $session->prix_reserve,
+        ]);
+
+        // Enregistrer l'action dans les logs
+        AppLog::create([
+            'user_id'     => $request->user()->id,
+            'action'      => 'modification_session',
+            'description' => "Session #{$session->id} modifiée",
+            'horodatage'  => now(),
+        ]);
 
         return response()->json([
             'message' => 'Session modifiée.',
@@ -175,48 +210,50 @@ class SessionEnchereController extends Controller
     /**
      * POST /api/sessions/{session}/interrompre
      * auth:sanctum + role:commissaire_priseur
-     * Interrompt temporairement une enchère en cours.
+     * Suspendre temporairement une enchère en cours.
      */
-    public function interrompre(SessionEnchere $session)
+    public function interrompre(Request $request, SessionEnchere $session)
     {
         if ($session->statut !== SessionEnchere::STATUT_EN_COURS) {
             return response()->json(['message' => 'La session n\'est pas en cours.'], 422);
         }
 
         $session->update(['statut' => SessionEnchere::STATUT_INTERROMPUE]);
-        //log d'interruption de session d'enchère
-         LogController::log(
-          'interruption_session',
-          "Session #{$session->id} interrompue"
-             );
+
+        // Enregistrer l'action dans les logs
+        AppLog::create([
+            'user_id'     => $request->user()->id,
+            'action'      => 'interruption_session',
+            'description' => "Session #{$session->id} interrompue",
+            'horodatage'  => now(),
+        ]);
+
         return response()->json(['message' => 'Enchère suspendue.']);
     }
 
     /**
      * POST /api/sessions/{session}/reprendre
      * auth:sanctum + role:commissaire_priseur
-     * Reprend une enchère interrompue.
+     * Reprendre une enchère qui avait été interrompue.
      */
-    public function reprendre(SessionEnchere $session)
+    public function reprendre(Request $request, SessionEnchere $session)
     {
         if ($session->statut !== SessionEnchere::STATUT_INTERROMPUE) {
             return response()->json(['message' => 'La session n\'est pas interrompue.'], 422);
         }
 
         $session->update(['statut' => SessionEnchere::STATUT_EN_COURS]);
-        //log de reprise de session d'enchère
-         LogController::log(
-          'reprise_session',
-          "Session #{$session->id} reprise"
-             );
+
+        // Enregistrer l'action dans les logs
+        AppLog::create([
+            'user_id'     => $request->user()->id,
+            'action'      => 'reprise_session',
+            'description' => "Session #{$session->id} reprise",
+            'horodatage'  => now(),
+        ]);
+
         return response()->json(['message' => 'Enchère reprise.']);
     }
-
-    /*
-    |--------------------------------------------------------------------------
-    | Superviseur
-    |--------------------------------------------------------------------------
-    */
 
     /**
      * GET /api/superviseur/sessions
@@ -236,39 +273,63 @@ class SessionEnchereController extends Controller
     /**
      * GET /api/superviseur/sessions/{session}
      * auth:sanctum + role:superviseur
-     * Temps réel pour supervision (polling) : meilleure offre, offres récentes.
+     * Vue temps réel pour la supervision (polling).
      */
     public function superviser(SessionEnchere $session)
     {
         $session->load([
             'bien:id,titre,categorie_id',
             'bien.categorie:id,libelle',
-            'offres' => fn($q) => $q->orderByDesc('montant')->limit(30),
+            'offres' => function ($q) {
+                $q->orderByDesc('montant')->limit(30);
+            },
         ]);
+
+        // Formater l'historique des offres
+        $historiqueOffres = [];
+        foreach ($session->offres as $offre) {
+            $historiqueOffres[] = [
+                'montant'    => $offre->montant,
+                'id_anonyme' => $offre->id_anonyme,
+                'heure'      => $offre->created_at->format('H:i:s'),
+            ];
+        }
+
+        // Construire la liste des participants (une ligne par enchérisseur)
+        $participants    = [];
+        $enchereursVus   = [];
+
+        foreach ($session->offres as $offre) {
+            $encherisseurId = $offre->encherisseur_id;
+
+            if (!in_array($encherisseurId, $enchereursVus)) {
+                $enchereursVus[] = $encherisseurId;
+
+                // Trouver la meilleure offre de cet enchérisseur
+                $meilleureOffre = $session->offres
+                    ->where('encherisseur_id', $encherisseurId)
+                    ->max('montant');
+
+                $participants[] = [
+                    'id_anonyme'      => $offre->id_anonyme,
+                    'meilleure_offre' => $meilleureOffre,
+                ];
+            }
+        }
 
         return response()->json([
             'data' => [
-                'session'              => [
-                    'id'    => $session->id,
-                    'statut'=> $session->statut,
+                'session' => [
+                    'id'       => $session->id,
+                    'statut'   => $session->statut,
                     'date_fin' => $session->date_fin,
                 ],
-                'bien'                 => $session->bien,
-                'meilleure_offre'      => $session->meilleure_offre?->montant ?? 0,
-                'id_meilleur'          => $session->meilleure_offre?->id_anonyme ?? null,
-                'secondes_restantes'   => $session->secondes_restantes,
-                'historique_offres'    => $session->offres->map(fn($o) => [
-                    'montant'    => $o->montant,
-                    'id_anonyme' => $o->id_anonyme,
-                    'heure'      => $o->created_at->format('H:i:s'),
-                ]),
-                'participants'         => $session->offres
-                    ->groupBy('encherisseur_id')
-                    ->map(fn($offres) => [
-                        'id_anonyme'     => $offres->first()->id_anonyme,
-                        'meilleure_offre'=> $offres->max('montant'),
-                    ])
-                    ->values(),
+                'bien'                => $session->bien,
+                'meilleure_offre'     => $session->meilleure_offre?->montant ?? 0,
+                'id_meilleur'         => $session->meilleure_offre?->id_anonyme ?? null,
+                'secondes_restantes'  => $session->secondes_restantes,
+                'historique_offres'   => $historiqueOffres,
+                'participants'        => $participants,
             ],
         ]);
     }

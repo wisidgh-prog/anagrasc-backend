@@ -9,12 +9,15 @@ class CategorieController extends Controller
 {
     /**
      * GET /api/categories
-     * Public – Liste des catégories.
+     * Public – Liste des catégories de biens.
      */
     public function index()
     {
-        return response()->json([
-            'data' => Categorie::select('id', 'libelle')->orderBy('libelle')->get(),
-        ]);
+        // On retourne uniquement l'id et le libellé, triés par ordre alphabétique
+        $categories = Categorie::select('id', 'libelle')
+            ->orderBy('libelle')
+            ->get();
+
+        return response()->json(['data' => $categories]);
     }
 }

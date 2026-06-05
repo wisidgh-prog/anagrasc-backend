@@ -3,10 +3,13 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
-use App\Models\{ Encherisseur, Wallet, Role};
+use App\Models\Encherisseur;
+use App\Models\Role;
+use App\Models\User;
+use App\Models\Wallet;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
-use App\Models\User;
+
 class AuthController extends Controller
 {
     /*
@@ -17,60 +20,75 @@ class AuthController extends Controller
     */
     public function register(Request $request)
     {
-        $validated = $request->validate([
-            'type_personne'                  => 'required|in:physique,morale',
-            'nom'                            => 'required_if:type_personne,physique|string|max:191',
-            'prenom'                         => 'required_if:type_personne,physique|string|max:191',
-            'date_naissance'                 => 'required_if:type_personne,physique|date',
-            'lieu_naissance'                 => 'required_if:type_personne,physique|string|max:191',
-            'raison_sociale'                 => 'required_if:type_personne,morale|string|max:191',
-            'num_rccm'                       => 'required_if:type_personne,morale|string|max:191',
-            'num_ifu'                        => 'nullable|string|max:191',
-            'representant_legal_nom'         => 'required_if:type_personne,morale|string|max:191',
-            'representant_legal_prenom'      => 'required_if:type_personne,morale|string|max:191',
-            'representant_legal_date_naissance'=> 'required_if:type_personne,morale|date',
-            'representant_legal_lieu_naissance'=> 'required_if:type_personne,morale|string|max:191',
-            'representant_legal_fonction'    => 'required_if:type_personne,morale|string|max:191',
-            'telephone'                      => 'required|string|max:191|unique:users,telephone',
-            'email'                          => 'nullable|email|max:191|unique:users,email',
-            'ville'                          => 'required|string|max:191',
-            'type_piece'                     => 'required|in:cnib,passeport,carte_consulaire,carte_aes,permis,rccm',
-            'num_piece'                      => 'required|string|max:191',
-            'piece_recto'                    => 'required|file|mimes:jpg,jpeg,png,pdf|max:5120',
-            'piece_verso'                    => 'required|file|mimes:jpg,jpeg,png,pdf|max:5120',
-            'password'                       => 'required|string|min:8|confirmed',
+        $request->validate([
+            'type_personne'                     => 'required|in:physique,morale',
+
+            // Champs obligatoires uniquement si type_personne = physique
+            'nom'                               => 'required_if:type_personne,physique|string|max:191',
+            'prenom'                            => 'required_if:type_personne,physique|string|max:191',
+            'date_naissance'                    => 'required_if:type_personne,physique|date',
+            'lieu_naissance'                    => 'required_if:type_personne,physique|string|max:191',
+
+            // Champs obligatoires uniquement si type_personne = morale
+            'raison_sociale'                    => 'required_if:type_personne,morale|string|max:191',
+            'num_rccm'                          => 'required_if:type_personne,morale|string|max:191',
+            'num_ifu'                           => 'nullable|string|max:191',
+            'representant_legal_nom'            => 'required_if:type_personne,morale|string|max:191',
+            'representant_legal_prenom'         => 'required_if:type_personne,morale|string|max:191',
+            'representant_legal_date_naissance' => 'required_if:type_personne,morale|date',
+            'representant_legal_lieu_naissance' => 'required_if:type_personne,morale|string|max:191',
+            'representant_legal_fonction'       => 'required_if:type_personne,morale|string|max:191',
+
+            // Champs communs
+            'telephone' => 'required|string|max:191|unique:users,telephone',
+            'email'     => 'nullable|email|max:191|unique:users,email',
+            'ville'     => 'required|string|max:191',
+            'type_piece'=> 'required|in:cnib,passeport,carte_consulaire,carte_aes,permis,rccm',
+            'num_piece' => 'required|string|max:191',
+            'piece_recto' => 'required|file|mimes:jpg,jpeg,png,pdf|max:5120',
+            'piece_verso' => 'required|file|mimes:jpg,jpeg,png,pdf|max:5120',
+            'password'  => 'required|string|min:8|confirmed',
         ]);
 
+        // Le rôle est toujours "encherisseur" pour l'inscription publique
+        // On ne laisse JAMAIS l'utilisateur choisir son rôle
         $role = Role::where('nom', 'encherisseur')->firstOrFail();
 
+        // Stocker les pièces d'identité dans le disque "local" (privé, non accessible publiquement)
+        $pieceRectoUrl = $request->file('piece_recto')->store('pieces', 'local');
+        $pieceVersoUrl = $request->file('piece_verso')->store('pieces', 'local');
+
+        // Créer le compte utilisateur
         $user = User::create([
-            'role_id'       => $role->id,
-            'type_personne' => $validated['type_personne'],
-            'nom'                           => $validated['nom'] ?? null,
-            'prenom'                        => $validated['prenom'] ?? null,
-            'date_naissance'                => $validated['date_naissance'] ?? null,
-            'lieu_naissance'                => $validated['lieu_naissance'] ?? null,
-            'raison_sociale'                => $validated['raison_sociale'] ?? null,
-            'num_rccm'                      => $validated['num_rccm'] ?? null,
-            'num_ifu'                       => $validated['num_ifu'] ?? null,
-            'representant_legal_nom'        => $validated['representant_legal_nom'] ?? null,
-            'representant_legal_prenom'     => $validated['representant_legal_prenom'] ?? null,
-            'representant_legal_date_naissance' => $validated['representant_legal_date_naissance'] ?? null,
-            'representant_legal_lieu_naissance' => $validated['representant_legal_lieu_naissance'] ?? null,
-            'representant_legal_fonction'   => $validated['representant_legal_fonction'] ?? null,
-            'telephone'                     => $validated['telephone'],
-            'email'                         => $validated['email'] ?? null,
-            'ville'                         => $validated['ville'],
-            'password'                      => Hash::make($validated['password']),
-            'type_piece'                    => $validated['type_piece'],
-            'num_piece'                     => $validated['num_piece'],
-            'piece_recto_url'               => $request->file('piece_recto')->store('pieces', 'local'),
-            'piece_verso_url'               => $request->file('piece_verso')->store('pieces', 'local'),
-            'est_valide'                    => false,
+            'role_id'                           => $role->id,
+            'type_personne'                     => $request->type_personne,
+            'nom'                               => $request->nom,
+            'prenom'                            => $request->prenom,
+            'date_naissance'                    => $request->date_naissance,
+            'lieu_naissance'                    => $request->lieu_naissance,
+            'raison_sociale'                    => $request->raison_sociale,
+            'num_rccm'                          => $request->num_rccm,
+            'num_ifu'                           => $request->num_ifu,
+            'representant_legal_nom'            => $request->representant_legal_nom,
+            'representant_legal_prenom'         => $request->representant_legal_prenom,
+            'representant_legal_date_naissance' => $request->representant_legal_date_naissance,
+            'representant_legal_lieu_naissance' => $request->representant_legal_lieu_naissance,
+            'representant_legal_fonction'       => $request->representant_legal_fonction,
+            'telephone'                         => $request->telephone,
+            'email'                             => $request->email,
+            'ville'                             => $request->ville,
+            'password'                          => Hash::make($request->password),
+            'type_piece'                        => $request->type_piece,
+            'num_piece'                         => $request->num_piece,
+            'piece_recto_url'                   => $pieceRectoUrl,
+            'piece_verso_url'                   => $pieceVersoUrl,
+            'est_valide'                        => false, // doit être validé par l'admin
         ]);
 
-        // Créer le profil enchérisseur et le wallet
+        // Créer le profil enchérisseur lié au compte
         $encherisseur = Encherisseur::create(['personne_id' => $user->id]);
+
+        // Créer le wallet (portefeuille) de l'enchérisseur avec un solde à 0
         Wallet::create(['encherisseur_id' => $encherisseur->id]);
 
         return response()->json([
@@ -86,24 +104,27 @@ class AuthController extends Controller
     */
     public function login(Request $request)
     {
-        $validated = $request->validate([
+        $request->validate([
             'telephone' => 'required|string',
             'password'  => 'required|string',
         ]);
 
-        /** @var User|null $user */
-        $user = User::where('telephone', $validated['telephone'])->first();
+        // Chercher l'utilisateur par son numéro de téléphone
+        $user = User::where('telephone', $request->telephone)->first();
 
-        if (!$user || !Hash::check($validated['password'], $user->password)) {
+        // Vérifier que l'utilisateur existe et que le mot de passe est correct
+        if (!$user || !Hash::check($request->password, $user->password)) {
             return response()->json(['message' => 'Identifiants incorrects.'], 401);
         }
 
-        if ($user instanceof User && $user->isEncherisseur() && !$user->peutEncherir()) {
+        // Si c'est un enchérisseur, vérifier que son compte est validé et non suspendu
+        if ($user->isEncherisseur() && !$user->peutEncherir()) {
             return response()->json([
                 'message' => 'Votre compte enchérisseur est en attente de validation ou suspendu.',
             ], 403);
         }
 
+        // Créer le token Sanctum pour cette session
         $token = $user->createToken('api-token')->plainTextToken;
 
         return response()->json([
@@ -125,6 +146,7 @@ class AuthController extends Controller
     */
     public function me(Request $request)
     {
+        // Charger le rôle et le wallet en même temps pour éviter plusieurs requêtes
         $user = $request->user()->load('role', 'encherisseur.wallet');
 
         return response()->json([
@@ -135,6 +157,7 @@ class AuthController extends Controller
                 'telephone'   => $user->telephone,
                 'email'       => $user->email,
                 'est_valide'  => $user->est_valide,
+                // optional() évite une erreur si l'utilisateur n'a pas de profil enchérisseur
                 'solde'       => optional($user->encherisseur)->solde ?? 0,
             ],
         ]);
@@ -148,6 +171,7 @@ class AuthController extends Controller
     */
     public function logout(Request $request)
     {
+        // Supprimer uniquement le token utilisé pour cette requête
         $request->user()->currentAccessToken()->delete();
 
         return response()->json(['message' => 'Déconnecté.']);

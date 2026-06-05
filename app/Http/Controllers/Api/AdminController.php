@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\User;
 use App\Models\Role;
+use App\Models\Bien;
 use App\Http\Controllers\Api\LogController;
 use Illuminate\Http\Request;
 
@@ -22,8 +23,8 @@ class AdminController extends Controller
 
         // Filtre par rôle si l'admin l'a demandé (?role=encherisseur)
         if ($request->filled('role')) {
-            $query->whereHas('role', function ($q) use ($request) {
-                $q->where('nom', $request->role);
+            $query->whereHas('role', function ($query) use ($request) {
+                $query->where('nom', $request->role);
             });
         }
 
@@ -36,8 +37,8 @@ class AdminController extends Controller
         if ($request->filled('search')) {
             $search = $request->search;
 
-            $query->where(function ($q) use ($search) {
-                $q->where('nom', 'like', '%' . $search . '%')
+            $query->where(function ($query) use ($search) {
+                $query->where('nom', 'like', '%' . $search . '%')
                   ->orWhere('prenom', 'like', '%' . $search . '%')
                   ->orWhere('telephone', 'like', '%' . $search . '%')
                   ->orWhere('email', 'like', '%' . $search . '%');
@@ -189,7 +190,7 @@ class AdminController extends Controller
 
     /**
      * GET /api/superviseurs
-     * auth:sanctum + role:commissaire_priseur OU administrateur
+     * auth:sanctum + role:commissaire_priseur
      * Retourne la liste des superviseurs actifs.
      */
     public function superviseurs(Request $request)
@@ -204,4 +205,26 @@ class AdminController extends Controller
 
         return response()->json(['data' => $superviseurs]);
     }
+
+    /**
+ * POST /api/admin/biens/{bien}/valider
+ * auth:sanctum + role:administrateur
+ * L'administrateur valide un bien en attente.
+ */
+public function valider(Bien $bien)
+{
+    if ($bien->statut !== 'en_attente_validation') {
+        return response()->json(['message' => 'Ce bien est déja validé.'], 422);
+    }
+
+    $bien->update(['statut' => 'publie']);
+
+    LogController::log(
+        'validation_bien',
+        "Bien #{$bien->id} '{$bien->titre}' validé"
+    );
+
+    return response()->json(['message' => 'Bien validé et publié.']);
+}
+
 }
