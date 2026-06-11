@@ -80,7 +80,7 @@ public function export(Request $request)
     $pdf = Pdf::loadView('Log.pdf', compact('logs'));
 
     // Télécharger le fichier
-    return $pdf->download('logs_anagrasc.pdf');
+    return $pdf->stream('logs_anagrasc.pdf');
 }
 
     /**

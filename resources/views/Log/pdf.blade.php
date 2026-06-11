@@ -10,7 +10,7 @@
     </style>
 </head>
 <body>
-    <h2>Logs ANAGRASC — {{ now()->format('d/m/Y') }}</h2>
+    <h2>Logs ANAGRASC du {{ now()->format('d/m/Y') }}</h2>
     <table>
         <thead>
             <tr>

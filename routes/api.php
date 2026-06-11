@@ -14,10 +14,8 @@ use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\RoleController;
 
 
-//ROUTE PUBLIC POUR L'AUTHENTIFICATION SANS TOKEN
-    Route::post('/login', [AuthController::class, 'login']);
-    Route::post('/register', [AuthController::class, 'register']);
 
+//ROUTE PROTÉGÉES DE CONNEXION ET DECONNECTION PAR AUTH:SANCTUM
  Route::middleware('auth:sanctum')->group(function () {
     Route::get('/me', [AuthController::class, 'me']);
     Route::post('/logout', [AuthController::class, 'logout']);
@@ -28,7 +26,9 @@ use App\Http\Controllers\Api\RoleController;
     | PUBLIQUE
     |--------------------------------------------------------------------------
     */
-
+//Routes pour la connexion et l'inscription
+Route::post('/login', [AuthController::class, 'login']);
+Route::post('/register', [AuthController::class, 'register']);
 // Routes pour les biens
 Route::get('/biens', [BienController::class, 'index']);
 Route::get('/biens/{bien}', [BienController::class, 'show']);
@@ -47,7 +47,7 @@ Route::get('/categories', [CategorieController::class, 'index']);
     */
 
 // Enchérisseur valide
-Route::middleware(['auth:sanctum', 'role:encherisseur', 'encherisseur.valide'])->group(function () {
+Route::middleware(['auth:sanctum', \App\Http\Middleware\CheckRole::class . ':encherisseur', \App\Http\Middleware\CheckEncherisseurValide::class])->group(function () {
 // Routes pour le portefeuille
     Route::post('/sessions/{session}/offrir', [OffreController::class, 'store']);
     Route::get('/mes-participations', [OffreController::class, 'mesParticipations']);
@@ -71,7 +71,7 @@ Route::get('/wallet', [WalletController::class, 'show']);
     */
 
 //ROUTES POUR LES BIENS
-Route::middleware(['auth:sanctum', 'role:commissaire_priseur'])->group(function () {
+Route::middleware(['auth:sanctum', \App\Http\Middleware\CheckRole::class . ':commissaire_priseur'])->group(function () {
     Route::get('/commissaire/biens', [BienController::class, 'mesBiens']);
     Route::post('/biens', [BienController::class, 'store']);
     Route::put('/biens/{bien}', [BienController::class, 'update']);
@@ -141,7 +141,7 @@ Route::middleware(['auth:sanctum', \App\Http\Middleware\CheckRole::class . ':sup
 Route::get('/utilisateurs/{user}/piece/recto', [PieceController::class, 'afficherRecto']);
 Route::get('/utilisateurs/{user}/piece/verso', [PieceController::class, 'afficherVerso']);
 //Route pour la validation de bien
- Route::get('/biens', [BienController::class, 'indexAdmin']);
+ Route::get('admin/biens', [BienController::class, 'indexAdmin']);
 Route::post('/biens/{bien}/valider', [BienController::class, 'valider']);
 Route::post('/biens/{bien}/rejeter', [BienController::class, 'rejeter']);
 });

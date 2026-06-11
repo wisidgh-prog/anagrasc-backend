@@ -12,19 +12,18 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware) {
-        // 1. Ajoute le middleware Sanctum pour les API avec authentification par cookies
         $middleware->api(prepend: [
             \Laravel\Sanctum\Http\Middleware\EnsureFrontendRequestsAreStateful::class,
         ]);
 
-        // 2. Définit des alias pour nos futurs middlewares personnalisés
+        // Alias pour les middlewares (optionnel, mais on les garde)
         $middleware->alias([
             'role' => \App\Http\Middleware\CheckRole::class,
             'encherisseur.valide' => \App\Http\Middleware\CheckEncherisseurValide::class,
         ]);
-        //3. redirige les utilisateurs non authentifiés vers une réponse JSON au lieu de la page de login
-    $middleware->redirectGuestsTo(fn () => response()->json(['message' => 'Unauthenticated.'], 401));
 
+        // FORCE la réponse JSON pour les utilisateurs non authentifiés
+        $middleware->redirectGuestsTo(fn () => response()->json(['message' => 'Non authentifié.'], 401));
     })
     ->withExceptions(function (Exceptions $exceptions) {
         //
