@@ -6,7 +6,6 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
-use Illuminate\Support\Facades\DB;
 
 class SessionEnchere extends Model
 {
@@ -17,18 +16,18 @@ class SessionEnchere extends Model
     | Constantes de statut
     |--------------------------------------------------------------------------
     */
-    public const STATUT_A_VENIR    = 'a_venir';
-    public const STATUT_EN_COURS   = 'en_cours';
-    public const STATUT_TERMINEE   = 'terminee';
+    public const STATUT_A_VENIR     = 'a_venir';
+    public const STATUT_EN_COURS    = 'en_cours';
+    public const STATUT_TERMINEE    = 'terminee';
     public const STATUT_INTERROMPUE = 'interrompue';
 
     /*
     |--------------------------------------------------------------------------
-    | Attributs assignables en masse
+    | Configuration
     |--------------------------------------------------------------------------
     */
+    protected $table    = 'sessions_enchere';
 
-    protected $table = 'sessions_enchere';
     protected $fillable = [
         'bien_id',
         'commissaire_id',
@@ -37,17 +36,12 @@ class SessionEnchere extends Model
         'date_fin',
         'mise_a_prix_effective',
         'montant_min_surenchere',
-        'prix_reserve',            // confidentiel
+        'prix_reserve',
         'statut',
         'offre_gagnante_id',
-        'paiement_effectue_le',   // date de confirmation du paiement
+        'paiement_effectue_le',
     ];
 
-    /*
-    |--------------------------------------------------------------------------
-    | Casts des attributs
-    |--------------------------------------------------------------------------
-    */
     protected $casts = [
         'date_debut'             => 'datetime',
         'date_fin'               => 'datetime',
@@ -57,11 +51,6 @@ class SessionEnchere extends Model
         'paiement_effectue_le'   => 'datetime',
     ];
 
-    /*
-    |--------------------------------------------------------------------------
-    | Attributs cachés dans les réponses JSON (sécurité)
-    |--------------------------------------------------------------------------
-    */
     protected $hidden = [
         'prix_reserve', // ne jamais exposer publiquement
     ];
@@ -72,57 +61,36 @@ class SessionEnchere extends Model
     |--------------------------------------------------------------------------
     */
 
-    /**
-     * Bien mis en vente.
-     */
     public function bien(): BelongsTo
     {
         return $this->belongsTo(Bien::class);
     }
 
-    /**
-     * Commissaire-priseur responsable.
-     */
     public function commissaire(): BelongsTo
     {
         return $this->belongsTo(User::class, 'commissaire_id');
     }
 
-    /**
-     * Superviseur affecté (optionnel).
-     */
     public function superviseur(): BelongsTo
     {
         return $this->belongsTo(User::class, 'superviseur_id');
     }
 
-    /**
-     * Offres déposées pendant cette session.
-     */
     public function offres(): HasMany
     {
         return $this->hasMany(Offre::class, 'session_id');
     }
 
-    /**
-     * Offre gagnante (définie à la clôture).
-     */
     public function offreGagnante(): BelongsTo
     {
         return $this->belongsTo(Offre::class, 'offre_gagnante_id');
     }
 
-    /**
-     * Incidents signalés durant cette session.
-     */
     public function incidents(): HasMany
     {
         return $this->hasMany(Incident::class, 'session_id');
     }
 
-    /**
-     * Transactions liées à cette session.
-     */
     public function transactions(): HasMany
     {
         return $this->hasMany(Transaction::class, 'session_id');
@@ -143,14 +111,24 @@ class SessionEnchere extends Model
     }
 
     /**
-     * Nombre de secondes restantes jusqu'à la fin (0 si terminée).
+     * Nombre de secondes restantes jusqu'à la fin.
+     * Retourne 0 si pas encore commencée, terminée ou interrompue.
      */
     public function getSecondesRestantesAttribute(): int
     {
-        if (!$this->estActive()) {
+        $maintenant = now();
+
+        // Pas encore commencée
+        if ($maintenant->lessThan($this->date_debut)) {
             return 0;
         }
-        return max(0, now()->diffInSeconds($this->date_fin, false));
+
+        // Terminée ou interrompue
+        if (in_array($this->statut, [self::STATUT_TERMINEE, self::STATUT_INTERROMPUE])) {
+            return 0;
+        }
+
+        return max(0, $maintenant->diffInSeconds($this->date_fin, false));
     }
 
     /*
@@ -160,17 +138,30 @@ class SessionEnchere extends Model
     */
 
     /**
-     * Vérifie si la session est active (statut en_cours et dans la plage horaire).
+     * Vérifie si la session accepte des offres.
+     *
+     * Logique :
+     * - Terminée ou interrompue → jamais active
+     * - Dans la plage date_debut → date_fin → active
+     *   (même si le scheduler n'a pas encore mis à jour le statut de a_venir à en_cours)
      */
     public function estActive(): bool
     {
-        return $this->statut === self::STATUT_EN_COURS
-            && now()->between($this->date_debut, $this->date_fin);
+        $maintenant = now();
+
+        // Terminée ou interrompue → refus immédiat
+        if (in_array($this->statut, [self::STATUT_TERMINEE, self::STATUT_INTERROMPUE])) {
+            return false;
+        }
+
+        // Active si on est dans la fenêtre date_debut → date_fin
+        return $maintenant->greaterThanOrEqualTo($this->date_debut)
+            && $maintenant->lessThanOrEqualTo($this->date_fin);
     }
 
     /**
      * Calcule le montant de la caution requise pour participer.
-     * Taux défini dans la configuration (0,1% par défaut, minimum 1000 FCFA).
+     * Taux défini dans la configuration (0.1% par défaut, minimum 1000 FCFA).
      */
     public function getCautionRequise(): float
     {

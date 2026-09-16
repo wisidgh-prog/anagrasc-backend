@@ -1,7 +1,7 @@
 <?php
 
 namespace App\Http\Controllers\Api;
-
+use App\Notifications\CompteActive;
 use App\Http\Controllers\Controller;
 use App\Models\User;
 use App\Models\Role;
@@ -69,6 +69,9 @@ class AdminController extends Controller
             'valide_le'  => now(),
             'valide_par' => $request->user()->id,
         ]);
+
+        // Envoyer la notification de validation
+        $user->notify(new CompteActive($user));
 
         //enregister la validation dans les logs
        LogController::log(

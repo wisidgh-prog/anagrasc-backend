@@ -65,7 +65,7 @@ class Incident extends Model
      */
     public function session(): BelongsTo
     {
-        return $this->belongsTo(SessionEnchere::class);
+        return $this->belongsTo(SessionEnchere::class,'session_id');
     }
 
     /**

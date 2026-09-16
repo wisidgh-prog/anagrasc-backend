@@ -88,8 +88,8 @@ class DashboardController extends Controller
             ->where('statut', SessionEnchere::STATUT_A_VENIR)
             ->count();
 
-        // Biens actifs (publiés ou en cours d'enchère) créés par ce commissaire
-        $biens_actifs = Bien::where('cree_par', $userId)
+        // Biens publiés (publiés ou en cours d'enchère) créés par ce commissaire
+        $biens_publies = Bien::where('cree_par', $userId)
             ->whereIn('statut', [Bien::STATUT_PUBLIE, Bien::STATUT_EN_COURS])
             ->count();
 
@@ -104,7 +104,7 @@ class DashboardController extends Controller
             'data' => [
                 'sessions_en_cours' => $sessions_en_cours,
                 'sessions_a_venir'  => $sessions_a_venir,
-                'biens_actifs'      => $biens_actifs,
+                'biens_publies'      => $biens_publies,
                 'incidents_ouverts' => $incidents_ouverts,
             ],
         ]);

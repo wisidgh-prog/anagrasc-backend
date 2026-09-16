@@ -36,6 +36,7 @@ class DemarreEncheresCommand extends Command
         foreach ($sessions as $session) {
             $session->update(['statut' => SessionEnchere::STATUT_EN_COURS]);
             $session->bien->update(['statut' => Bien::STATUT_EN_COURS]);
+             $this->info("Session #{$session->id} démarrée.");
         }
 
         $this->info(count($sessions) . ' session(s) démarrée(s).');

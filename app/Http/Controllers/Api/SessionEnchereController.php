@@ -163,49 +163,59 @@ class SessionEnchereController extends Controller
      * auth:sanctum + role:commissaire_priseur
      * Modifier une session (seulement si elle n'a pas encore démarré).
      */
-    public function update(Request $request, SessionEnchere $session)
-    {
-        // Seul le commissaire qui a créé la session peut la modifier
-        if ($session->commissaire_id !== $request->user()->id) {
-            return response()->json(['message' => 'Action non autorisée.'], 403);
-        }
-
-        // On ne peut modifier que les sessions pas encore démarrées
-        if ($session->statut !== SessionEnchere::STATUT_A_VENIR) {
-            return response()->json(['message' => 'La session ne peut plus être modifiée.'], 422);
-        }
-
-        $request->validate([
-            'superviseur_id'         => 'nullable|exists:users,id',
-            'date_debut'             => 'sometimes|date|after:now',
-            'date_fin'               => 'sometimes|date|after:date_debut',
-            'mise_a_prix_effective'  => 'sometimes|numeric|min:0',
-            'montant_min_surenchere' => 'sometimes|numeric|min:1',
-            'prix_reserve'           => 'nullable|numeric|min:0',
-        ]);
-
-        $session->update([
-            'superviseur_id'         => $request->superviseur_id ?? $session->superviseur_id,
-            'date_debut'             => $request->date_debut ?? $session->date_debut,
-            'date_fin'               => $request->date_fin ?? $session->date_fin,
-            'mise_a_prix_effective'  => $request->mise_a_prix_effective ?? $session->mise_a_prix_effective,
-            'montant_min_surenchere' => $request->montant_min_surenchere ?? $session->montant_min_surenchere,
-            'prix_reserve'           => $request->prix_reserve ?? $session->prix_reserve,
-        ]);
-
-        // Enregistrer l'action dans les logs
-        AppLog::create([
-            'user_id'     => $request->user()->id,
-            'action'      => 'modification_session',
-            'description' => "Session #{$session->id} modifiée",
-            'horodatage'  => now(),
-        ]);
-
-        return response()->json([
-            'message' => 'Session modifiée.',
-            'data'    => $session->fresh(),
-        ]);
+   public function update(Request $request, SessionEnchere $session)
+{
+    if ($session->commissaire_id !== $request->user()->id) {
+        return response()->json(['message' => 'Action non autorisée.'], 403);
     }
+
+    if ($session->statut !== SessionEnchere::STATUT_A_VENIR) {
+        return response()->json(['message' => 'La session ne peut plus être modifiée.'], 422);
+    }
+
+    // Calculer la date_debut de référence pour valider date_fin
+    $dateDebutRef = $request->date_debut ?? $session->date_debut;
+
+    $request->validate([
+        'superviseur_id'         => 'nullable|exists:users,id',
+        'date_debut'             => 'sometimes|date|after:now',
+        'date_fin'               => 'sometimes|date|after:' . $dateDebutRef,
+        'mise_a_prix_effective'  => 'sometimes|numeric|min:0',
+        'montant_min_surenchere' => 'sometimes|numeric|min:1',
+        'prix_reserve'           => 'nullable|numeric|min:0',
+    ]);
+
+    $session->update([
+        'superviseur_id'         => $request->superviseur_id ?? $session->superviseur_id,
+        'date_debut'             => $request->date_debut ?? $session->date_debut,
+        'date_fin'               => $request->date_fin ?? $session->date_fin,
+        'mise_a_prix_effective'  => $request->mise_a_prix_effective ?? $session->mise_a_prix_effective,
+        'montant_min_surenchere' => $request->montant_min_surenchere ?? $session->montant_min_surenchere,
+        'prix_reserve'           => $request->prix_reserve ?? $session->prix_reserve,
+    ]);
+
+    AppLog::create([
+        'user_id'     => $request->user()->id,
+        'action'      => 'modification_session',
+        'description' => "Session #{$session->id} modifiée",
+        'horodatage'  => now(),
+    ]);
+
+    return response()->json([
+        'message' => 'Session modifiée.',
+        'data'    => $session->fresh(),
+    ]);
+}
+
+/**
+ * Vérification que la session accepte les offres
+ * À appeler dans ton OffreController avant d'enregistrer une offre
+ */
+public function verifierDisponibilite(SessionEnchere $session): bool
+{
+    return $session->statut === SessionEnchere::STATUT_EN_COURS
+        && now()->between($session->date_debut, $session->date_fin);
+}
 
     /**
      * POST /api/sessions/{session}/interrompre
