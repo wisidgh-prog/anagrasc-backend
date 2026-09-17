@@ -59,8 +59,7 @@ class AuthController extends Controller
         $pieceVersoUrl = $request->file('piece_verso')->store('pieces', 'local');
 
         // Créer le compte utilisateur
-        $user = User::create([
-            'role_id'                           => $role->id,
+        $user = new User([
             'type_personne'                     => $request->type_personne,
             'nom'                               => $request->nom,
             'prenom'                            => $request->prenom,
@@ -82,8 +81,13 @@ class AuthController extends Controller
             'num_piece'                         => $request->num_piece,
             'piece_recto_url'                   => $pieceRectoUrl,
             'piece_verso_url'                   => $pieceVersoUrl,
-            'est_valide'                        => false, // doit être validé par l'admin
         ]);
+
+        // Champs privilégiés définis uniquement côté serveur (jamais assignables en masse)
+        $user->forceFill([
+            'role_id'                           => $role->id,
+            'est_valide'                        => false, // doit être validé par l'admin
+        ])->save();
 
         // Créer le profil enchérisseur lié au compte
         $encherisseur = Encherisseur::create(['personne_id' => $user->id]);
@@ -105,22 +109,41 @@ class AuthController extends Controller
     public function login(Request $request)
     {
         $request->validate([
-            'telephone' => 'required|string',
+            'telephone' => 'nullable|string',
+            'identifiant' => 'nullable|string',
             'password'  => 'required|string',
         ]);
 
-        // Chercher l'utilisateur par son numéro de téléphone
-        $user = User::where('telephone', $request->telephone)->first();
+        // "identifiant" est accepté comme alias de "telephone" pour la connexion par email.
+        // Le champ "telephone" est conservé pour la rétrocompatibilité de l'API.
+        $identifiant = $request->identifiant ?? $request->telephone;
+
+        // Pour ne pas que les deux champs soient tous deux absents
+        if (blank($identifiant)) {
+            return response()->json(['message' => 'Identifiants incorrects.'], 401);
+        }
+
+        // Connexion possible par email OU par téléphone (indifférent, insensible à la casse pour l'email)
+        $user = User::where('telephone', $identifiant)
+            ->orWhereRaw('LOWER(email) = ?', [strtolower($identifiant)])
+            ->first();
 
         // Vérifier que l'utilisateur existe et que le mot de passe est correct
         if (!$user || !Hash::check($request->password, $user->password)) {
             return response()->json(['message' => 'Identifiants incorrects.'], 401);
         }
 
-        // Si c'est un enchérisseur, vérifier que son compte est validé et non suspendu
-        if ($user->isEncherisseur() && !$user->peutEncherir()) {
+        // Aucun compte suspendu ne peut se connecter, quel que soit le rôle
+        if ($user->est_suspendu) {
             return response()->json([
-                'message' => 'Votre compte enchérisseur est en attente de validation ou suspendu.',
+                'message' => 'Votre compte est suspendu. Contactez l\'administrateur.',
+            ], 403);
+        }
+
+        // Si c'est un enchérisseur, vérifier que son compte est validé
+        if ($user->isEncherisseur() && !$user->est_valide) {
+            return response()->json([
+                'message' => 'Votre compte enchérisseur est en attente de validation.',
             ], 403);
         }
 

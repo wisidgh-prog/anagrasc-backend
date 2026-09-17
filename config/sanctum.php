@@ -47,7 +47,7 @@ return [
     |
     */
 
-    'expiration' => null,
+    'expiration' => 60 * 24 * 30, // 30 jours : un token volé ne reste pas valable indéfiniment
 
     /*
     |--------------------------------------------------------------------------

@@ -6,11 +6,47 @@ use App\Http\Controllers\Controller;
 use App\Models\AppLog;
 use App\Models\Bien;
 use App\Models\Incident;
+use App\Models\Offre;
 use App\Models\SessionEnchere;
+use App\Services\NotificationService;
+use App\Services\WalletService;
 use Illuminate\Http\Request;
 
 class IncidentController extends Controller
 {
+    public function __construct(
+        private NotificationService $notificationService,
+        private WalletService $walletService
+    ) {}
+
+    /**
+     * Rembourse la caution à chaque participant distinct d'une session.
+     * Utilisé lors d'une annulation ou d'une reprogrammation (le mail informant
+     * les participants promet ce remboursement, il doit donc avoir lieu).
+     */
+    private function rembourserCautions(SessionEnchere $session): void
+    {
+        $caution = $session->getCautionRequise();
+
+        // Participants = enchérisseurs ayant posé au moins une offre, sans doublon.
+        $encherisseurs = Offre::where('session_id', $session->id)
+            ->with('encherisseur')
+            ->get()
+            ->pluck('encherisseur')
+            ->filter()
+            ->unique('id');
+
+        foreach ($encherisseurs as $encherisseur) {
+            $this->walletService->rembourser($encherisseur, $caution, $session->id);
+        }
+
+        AppLog::create([
+            'user_id'     => auth()->id(),
+            'action'      => 'remboursement_cautions',
+            'description' => "Cautions remboursées à {$encherisseurs->count()} participant(s) de la session #{$session->id}",
+            'horodatage'  => now(),
+        ]);
+    }
     /**
      * POST /api/incidents
      * auth:sanctum + role:superviseur
@@ -24,6 +60,13 @@ class IncidentController extends Controller
             'description'   => 'required|string',
             'id_concerne'   => 'nullable|string|max:191', // ID anonyme de l'enchérisseur concerné, ex: ENCH-099
         ]);
+
+        // Le superviseur ne peut signaler que des incidents sur des sessions qui lui sont affectées
+        $session = SessionEnchere::findOrFail($request->session_id);
+
+        if ($session->superviseur_id !== $request->user()->id && !$request->user()->isAdmin()) {
+            return response()->json(['message' => 'Action non autorisée sur cette session.'], 403);
+        }
 
         // Créer l'incident avec le statut "ouvert"
         $incident = Incident::create([
@@ -63,6 +106,11 @@ class IncidentController extends Controller
             ])
             ->orderByDesc('date_signalement');
 
+        // Un commissaire ne voit que les incidents liés à ses propres sessions (l'admin voit tout)
+        if (!$request->user()->isAdmin()) {
+            $query->whereHas('session', fn ($q) => $q->where('commissaire_id', $request->user()->id));
+        }
+
         // Filtre par statut si demandé (?statut=ouvert)
         if ($request->filled('statut')) {
             $query->where('statut', $request->statut);
@@ -85,6 +133,11 @@ class IncidentController extends Controller
      */
     public function decision(Request $request, Incident $incident)
     {
+        // Un commissaire ne peut traiter qu'un incident sur une de ses sessions (l'admin peut tout)
+        if (!$request->user()->isAdmin() && $incident->session->commissaire_id !== $request->user()->id) {
+            return response()->json(['message' => 'Action non autorisée sur cet incident.'], 403);
+        }
+
         // On ne peut pas traiter un incident déjà traité
         if ($incident->statut !== Incident::STATUT_OUVERT) {
             return response()->json(['message' => 'Cet incident a déjà été traité.'], 422);
@@ -126,6 +179,12 @@ class IncidentController extends Controller
             $session->update(['statut' => SessionEnchere::STATUT_TERMINEE]);
             // Le bien est remis en vente (redevient "publié")
             $bien->update(['statut' => Bien::STATUT_PUBLIE]);
+
+            // Rembourser les cautions (promis par le mail d'annulation)
+            $this->rembourserCautions($session);
+
+            // Informer les participants de l'annulation
+            $this->notificationService->notifierAnnulation($session, $request->note_decision);
         }
 
         if ($request->decision === Incident::DECISION_REPROGRAMMATION) {
@@ -133,6 +192,9 @@ class IncidentController extends Controller
             $session->update(['statut' => SessionEnchere::STATUT_TERMINEE]);
             // Le bien est remis en vente
             $bien->update(['statut' => Bien::STATUT_PUBLIE]);
+
+            // Rembourser les cautions de l'ancienne session
+            $this->rembourserCautions($session);
 
             // Créer une nouvelle session avec les mêmes paramètres, décalée de 7 jours
             $nouvelleSession = SessionEnchere::create([
@@ -146,6 +208,9 @@ class IncidentController extends Controller
                 'prix_reserve'           => $session->prix_reserve,
                 'statut'                 => SessionEnchere::STATUT_A_VENIR,
             ]);
+
+            // Informer les participants du report et de la nouvelle session
+            $this->notificationService->notifierReport($session, $nouvelleSession, $request->note_decision);
 
             // Ajouter l'ID de la nouvelle session dans la note de décision
             $incident->note_decision = ($incident->note_decision ?? '') . "\nNouvelle session créée : ID {$nouvelleSession->id}";

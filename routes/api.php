@@ -12,6 +12,7 @@ use App\Http\Controllers\Api\ConfigurationController;
 use App\Http\Controllers\Api\DashboardController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\RoleController;
+use App\Http\Controllers\Api\MailTestController;
 
 
 
@@ -19,7 +20,10 @@ use App\Http\Controllers\Api\RoleController;
  Route::middleware('auth:sanctum')->group(function () {
     Route::get('/me', [AuthController::class, 'me']);
     Route::post('/logout', [AuthController::class, 'logout']);
-
+    // Paramètres non sensibles utiles aux formulaires (ex. surenchère minimum par défaut)
+    Route::get('/configurations-publiques', [ConfigurationController::class, 'publiques']);
+    // Compte rendu PDF d'une session terminée (commissaire, superviseur affecté ou admin)
+    Route::get('/sessions/{session}/compte-rendu', [SessionEnchereController::class, 'compteRendu']);
  });
  /*
     |--------------------------------------------------------------------------
@@ -129,6 +133,8 @@ Route::middleware(['auth:sanctum', \App\Http\Middleware\CheckRole::class . ':sup
 //Routes pour les configurations
     Route::get('/configurations', [ConfigurationController::class, 'index']);
     Route::put('/configurations/{configuration}', [ConfigurationController::class, 'update']);
+// Route de vérification SMTP (envoi d'UN SEUL email)
+    Route::post('/mail-test', [MailTestController::class, 'envoyer']);
 // Route pour le dashboard admin
     Route::get('/admin/dashboard', [DashboardController::class, 'admin']);
 // Routes pour la gestion des rôles et permissions
@@ -145,4 +151,3 @@ Route::get('/utilisateurs/{user}/piece/verso', [PieceController::class, 'affiche
 Route::post('/biens/{bien}/valider', [BienController::class, 'valider']);
 Route::post('/biens/{bien}/rejeter', [BienController::class, 'rejeter']);
 });
-

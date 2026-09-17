@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\AppLog;
 use App\Models\Bien;
 use App\Models\SessionEnchere;
+use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Http\Request;
 
 class SessionEnchereController extends Controller
@@ -88,6 +89,83 @@ class SessionEnchereController extends Controller
                 'offres'                 => $offresFormatees,
             ],
         ]);
+    }
+
+    /**
+     * Libellé français d'un statut de session (réutilisé dans la vue du compte rendu).
+     */
+    private function libelleStatut(string $statut): string
+    {
+        return match ($statut) {
+            SessionEnchere::STATUT_A_VENIR     => 'À venir',
+            SessionEnchere::STATUT_EN_COURS    => 'En cours',
+            SessionEnchere::STATUT_TERMINEE    => 'Terminée',
+            SessionEnchere::STATUT_INTERROMPUE => 'Interrompue',
+            default                            => $statut,
+        };
+    }
+
+    /**
+     * GET /api/sessions/{session}/compte-rendu
+     * auth:sanctum — commissaire propriétaire, superviseur affecté ou admin.
+     * Génère un compte rendu PDF téléchargeable de la session (terminée/interrompue).
+     */
+    public function compteRendu(Request $request, SessionEnchere $session)
+    {
+        // Seuls le commissaire propriétaire, le superviseur affecté ou un admin
+        // peuvent télécharger ce document (il contient le prix de réserve).
+        $user = $request->user();
+        $proprietaire = ($session->commissaire_id === $user->id)
+            || ($session->superviseur_id === $user->id)
+            || $user->isAdmin();
+
+        if (!$proprietaire) {
+            return response()->json(['message' => 'Accès non autorisé.'], 403);
+        }
+
+        // Un compte rendu n'a de sens qu'à l'issue d'une session.
+        if (!in_array($session->statut, [SessionEnchere::STATUT_TERMINEE, SessionEnchere::STATUT_INTERROMPUE])) {
+            return response()->json(['message' => 'La session n\'est pas encore terminée.'], 422);
+        }
+
+        // Charger toutes les données nécessaires au document.
+        $session->load([
+            'bien.categorie',
+            'commissaire',
+            'superviseur',
+            'offres' => function ($q) {
+                $q->orderByDesc('montant');
+            },
+        ]);
+
+        // L'offre gagnante est celle marquée 'est_gagnante' à la clôture.
+        $offreGagnante = $session->offres->firstWhere('est_gagnante', true)
+            ?? $session->offreGagnante;
+
+        // Participants : liste des enchérisseurs ayant placé au moins une offre.
+        $participants = $session->offres->pluck('encherisseur_id')->unique();
+
+        // Variable de la vue : bien, commissaire, superviseur, offres
+        $bien        = $session->bien;
+        $commissaire = $session->commissaire;
+        $superviseur = $session->superviseur;
+        $offres      = $session->offres;
+
+        $statutLibelle = $this->libelleStatut($session->statut);
+
+        // Générer le PDF à partir de la vue Blade dédiée.
+        $pdf = Pdf::loadView('CompteRendu.pdf', compact(
+            'session',
+            'offreGagnante',
+            'participants',
+            'statutLibelle',
+            'bien',
+            'commissaire',
+            'superviseur',
+            'offres'
+        ))->setPaper('a4');
+
+        return $pdf->download('compte_rendu_session_' . $session->id . '_' . now()->format('Ymd_His') . '.pdf');
     }
 
     /**
@@ -224,6 +302,10 @@ public function verifierDisponibilite(SessionEnchere $session): bool
      */
     public function interrompre(Request $request, SessionEnchere $session)
     {
+        if ($session->commissaire_id !== $request->user()->id && !$request->user()->isAdmin()) {
+            return response()->json(['message' => 'Action non autorisée.'], 403);
+        }
+
         if ($session->statut !== SessionEnchere::STATUT_EN_COURS) {
             return response()->json(['message' => 'La session n\'est pas en cours.'], 422);
         }
@@ -248,6 +330,10 @@ public function verifierDisponibilite(SessionEnchere $session): bool
      */
     public function reprendre(Request $request, SessionEnchere $session)
     {
+        if ($session->commissaire_id !== $request->user()->id && !$request->user()->isAdmin()) {
+            return response()->json(['message' => 'Action non autorisée.'], 403);
+        }
+
         if ($session->statut !== SessionEnchere::STATUT_INTERROMPUE) {
             return response()->json(['message' => 'La session n\'est pas interrompue.'], 422);
         }
@@ -285,8 +371,12 @@ public function verifierDisponibilite(SessionEnchere $session): bool
      * auth:sanctum + role:superviseur
      * Vue temps réel pour la supervision (polling).
      */
-    public function superviser(SessionEnchere $session)
+    public function superviser(Request $request, SessionEnchere $session)
     {
+        if ($session->superviseur_id !== $request->user()->id && !$request->user()->isAdmin()) {
+            return response()->json(['message' => 'Action non autorisée.'], 403);
+        }
+
         $session->load([
             'bien:id,titre,categorie_id',
             'bien.categorie:id,libelle',

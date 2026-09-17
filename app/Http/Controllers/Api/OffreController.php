@@ -7,7 +7,9 @@ use App\Models\AppLog;
 use App\Models\Offre;
 use App\Models\SessionEnchere;
 use App\Services\WalletService;
+use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 
 class OffreController extends Controller
 {
@@ -78,79 +80,92 @@ class OffreController extends Controller
 
         $montant = (float) $request->montant;
 
-        // 4. Calculer le montant minimum accepté
-        // Règle : max(meilleure offre actuelle, mise à prix) + surenchère minimum
-        $meilleureActuelle = (float) ($session->meilleure_offre?->montant ?? 0);
-        $miseAPrix         = (float) $session->mise_a_prix_effective;
-        $surenchereMin     = (float) $session->montant_min_surenchere;
-        $montantMinimum    = max($meilleureActuelle, $miseAPrix) + $surenchereMin;
+        // Toute la logique (vérification + débit + création) est atomique :
+        // la session est verrouillée en écriture, donc deux offres simultanées
+        // ne peuvent pas se marcher dessus (double débit, offre en double, collision d'ID).
+        try {
+            $resultat = DB::transaction(function () use ($session, $encherisseur, $user, $montant) {
+                // Verrouille la ligne de session jusqu'à la fin de la transaction
+                $session = SessionEnchere::whereKey($session->id)->lockForUpdate()->firstOrFail();
 
-        if ($montant < $montantMinimum) {
-            return response()->json([
-                'message' => "Montant minimum requis : {$montantMinimum} FCFA.",
-            ], 422);
+                // 4. Calculer le montant minimum accepté (lecture fraîche de la meilleure offre)
+                $meilleureActuelle = (float) ($session->meilleure_offre?->montant ?? 0);
+                $miseAPrix         = (float) $session->mise_a_prix_effective;
+                $surenchereMin     = (float) $session->montant_min_surenchere;
+                $montantMinimum    = max($meilleureActuelle, $miseAPrix) + $surenchereMin;
+
+                if ($montant < $montantMinimum) {
+                    return ['erreur' => 422, 'message' => "Montant minimum requis : {$montantMinimum} FCFA."];
+                }
+
+                // 5. Vérifier que le solde du wallet est suffisant pour payer la caution
+                $caution = $session->getCautionRequise();
+
+                if (!$encherisseur->wallet || !$encherisseur->wallet->soldeSuffisant($caution)) {
+                    return ['erreur' => 422, 'message' => "Solde insuffisant. La caution requise est de {$caution} FCFA."];
+                }
+
+                // 6. Prélever la caution seulement si c'est la première offre de cet enchérisseur sur cette session
+                $dejaParticipe = Offre::where('session_id', $session->id)
+                    ->where('encherisseur_id', $encherisseur->id)
+                    ->exists();
+
+                if (!$dejaParticipe) {
+                    $debite = $this->walletService->debiter(
+                        $encherisseur,
+                        $caution,
+                        'prelevement_caution',
+                        $session->id
+                    );
+
+                    if (!$debite) {
+                        return ['erreur' => 500, 'message' => 'Erreur lors du prélèvement de la caution.'];
+                    }
+                }
+
+                // 7. Récupérer ou générer l'ID anonyme (séquence dérivée des offres déjà en base)
+                if ($dejaParticipe) {
+                    $idAnonyme = Offre::where('session_id', $session->id)
+                        ->where('encherisseur_id', $encherisseur->id)
+                        ->value('id_anonyme');
+                } else {
+                    $idAnonyme = Offre::genererIdAnonyme($session->id);
+                }
+
+                // 8. Créer l'offre
+                $offre = Offre::create([
+                    'session_id'      => $session->id,
+                    'encherisseur_id' => $encherisseur->id,
+                    'montant'         => $montant,
+                    'id_anonyme'      => $idAnonyme,
+                    'est_gagnante'    => false,
+                ]);
+
+                // Enregistrer l'action dans les logs
+                AppLog::create([
+                    'user_id'     => $user->id,
+                    'action'      => 'offre',
+                    'description' => "Offre de {$offre->montant} FCFA placée par {$offre->id_anonyme} sur la session #{$session->id}",
+                    'horodatage'  => now(),
+                ]);
+
+                return ['offre' => $offre];
+            });
+        } catch (QueryException $e) {
+            // Violation de la contrainte unique : une offre existe déjà pour ce compte sur cette session
+            return response()->json(['message' => 'Vous avez déjà participé à cette session.'], 422);
         }
 
-        // 5. Vérifier que le solde du wallet est suffisant pour payer la caution
-        $caution = $session->getCautionRequise();
-
-        if (!$encherisseur->wallet || !$encherisseur->wallet->soldeSuffisant($caution)) {
-            return response()->json([
-                'message' => "Solde insuffisant. La caution requise est de {$caution} FCFA.",
-            ], 422);
+        if (isset($resultat['erreur'])) {
+            return response()->json(['message' => $resultat['message']], $resultat['erreur']);
         }
 
-        // 6. Prélever la caution seulement si c'est la première offre de cet enchérisseur sur cette session
-        $dejaParticipe = Offre::where('session_id', $session->id)
-            ->where('encherisseur_id', $encherisseur->id)
-            ->exists();
-
-        if (!$dejaParticipe) {
-            $debite = $this->walletService->debiter(
-                $encherisseur,
-                $caution,
-                'prelevement_caution',
-                $session->id
-            );
-
-            if (!$debite) {
-                return response()->json(['message' => 'Erreur lors du prélèvement de la caution.'], 500);
-            }
-        }
-
-        // 7. Récupérer ou générer l'ID anonyme
-        // Chaque enchérisseur garde le même ID anonyme pour toute la session (ex: ENCH-001)
-        if ($dejaParticipe) {
-            // Récupérer l'ID anonyme déjà attribué
-            $idAnonyme = Offre::where('session_id', $session->id)
-                ->where('encherisseur_id', $encherisseur->id)
-                ->value('id_anonyme');
-        } else {
-            // Générer un nouvel ID anonyme séquentiel
-            $idAnonyme = Offre::genererIdAnonyme($session->id);
-        }
-
-        // 8. Créer l'offre
-        $offre = Offre::create([
-            'session_id'      => $session->id,
-            'encherisseur_id' => $encherisseur->id,
-            'montant'         => $montant,
-            'id_anonyme'      => $idAnonyme,
-            'est_gagnante'    => false,
-        ]);
-
-        // Enregistrer l'action dans les logs
-        AppLog::create([
-            'user_id'     => $user->id,
-            'action'      => 'offre',
-            'description' => "Offre de {$offre->montant} FCFA placée par {$offre->id_anonyme} sur la session #{$session->id}",
-            'horodatage'  => now(),
-        ]);
+        $offre = $resultat['offre'];
 
         return response()->json([
             'message'    => 'Offre enregistrée.',
-            'id_anonyme' => $idAnonyme,
-            'montant'    => $montant,
+            'id_anonyme' => $offre->id_anonyme,
+            'montant'    => $offre->montant,
         ], 201);
     }
 
@@ -169,7 +184,6 @@ class OffreController extends Controller
 
         // Récupérer toutes les offres de cet enchérisseur avec les infos de session et de bien
         $toutesLesOffres = Offre::with([
-                'session:id,bien_id,date_fin,statut',
                 'session.bien:id,titre',
             ])
             ->where('encherisseur_id', $encherisseur->id)

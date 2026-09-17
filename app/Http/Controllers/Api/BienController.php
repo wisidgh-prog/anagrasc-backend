@@ -5,10 +5,12 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Bien;
 use App\Models\AppLog;
+use App\Services\NotificationService;
 use Illuminate\Http\Request;
 
 class BienController extends Controller
 {
+    public function __construct(private NotificationService $notificationService) {}
     /*
     |--------------------------------------------------------------------------
     | Consultation publique du catalogue
@@ -320,6 +322,9 @@ class BienController extends Controller
         }
 
         $bien->update(['statut' => Bien::STATUT_PUBLIE]);
+
+        // Informer les enchérisseurs validés de l'arrivée de ce nouveau bien
+        $this->notificationService->notifierNouveauBien($bien);
 
         // Enregistrer l'action dans les logs
         AppLog::create([
