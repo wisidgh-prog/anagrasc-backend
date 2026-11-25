@@ -15,7 +15,6 @@ class User extends Authenticatable
      * Attributs assignables en masse.
      */
     protected $fillable = [
-        'role_id',
         'type_personne',
         'nom',
         'prenom',
@@ -36,12 +35,6 @@ class User extends Authenticatable
         'type_piece',
         'num_piece',
         'piece_recto_url',
-        'piece_verso_url',
-        'est_valide',
-        'est_suspendu',
-        'valide_le',
-        'valide_par',
-        'piece_recto_url',   // Accès sécurisé uniquement via route dédiée
         'piece_verso_url',
     ];
 
@@ -67,6 +60,11 @@ class User extends Authenticatable
     ];
 
      protected $appends = ['nom_complet'];
+
+    /**
+     * Cache mémoire des noms de permissions (non persisté, non sérialisé).
+     */
+    protected ?array $permissionsCache = null;
 
     /*
     |--------------------------------------------------------------------------
@@ -162,6 +160,35 @@ class User extends Authenticatable
     public function isEncherisseur(): bool
     {
         return $this->hasRole('encherisseur');
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Méthodes de vérification de permission
+    |--------------------------------------------------------------------------
+    */
+
+    /**
+     * Noms des permissions effectives de l'utilisateur (héritées de son rôle).
+     * Le résultat est mis en cache pour la durée de la requête.
+     */
+    public function nomsPermissions(): array
+    {
+        if ($this->permissionsCache === null) {
+            $this->permissionsCache = $this->role
+                ? $this->role->permissions()->pluck('nom')->all()
+                : [];
+        }
+
+        return $this->permissionsCache;
+    }
+
+    /**
+     * Vérifie si l'utilisateur possède une permission donnée.
+     */
+    public function hasPermissionTo(string $permissionNom): bool
+    {
+        return in_array($permissionNom, $this->nomsPermissions(), true);
     }
 
     /*

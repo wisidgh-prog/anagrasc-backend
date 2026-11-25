@@ -4,13 +4,14 @@ namespace App\Notifications;
 
 use App\Models\SessionEnchere;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Notifications\Messages\MailMessage;
 use Illuminate\Notifications\Notification;
 
 /**
  * Notification informant les participants de l'annulation d'une session.
  */
-class SessionAnnuleeNotification extends Notification
+class SessionAnnuleeNotification extends Notification implements ShouldQueue
 {
     use Queueable;
 

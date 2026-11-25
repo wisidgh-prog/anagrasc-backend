@@ -7,11 +7,14 @@ use App\Models\Encherisseur;
 use App\Models\Role;
 use App\Models\User;
 use App\Models\Wallet;
+use App\Services\NotificationInAppService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 
 class AuthController extends Controller
 {
+    public function __construct(private NotificationInAppService $notifications) {}
+
     /*
     |--------------------------------------------------------------------------
     | Inscription d'un nouvel enchérisseur
@@ -95,6 +98,15 @@ class AuthController extends Controller
         // Créer le wallet (portefeuille) de l'enchérisseur avec un solde à 0
         Wallet::create(['encherisseur_id' => $encherisseur->id]);
 
+        // Notifier les administrateurs qu'un compte attend une validation
+        $this->notifications->auxAdmins(
+            'Nouvelle inscription à valider',
+            "Le compte de {$user->nom_complet} ({$user->telephone}) attend une validation.",
+            '/admin/utilisateurs',
+            'person_add',
+            'compte'
+        );
+
         return response()->json([
             'message' => 'Inscription réussie. Votre compte est en attente de validation.',
         ], 201);
@@ -123,9 +135,19 @@ class AuthController extends Controller
             return response()->json(['message' => 'Identifiants incorrects.'], 401);
         }
 
-        // Connexion possible par email OU par téléphone (indifférent, insensible à la casse pour l'email)
+        // Connexion possible par email OU par téléphone (indifférent, insensible à la casse pour l'email).
+        // Pour le téléphone, on tolère l'absence d'indicatif pays (+226) : l'utilisateur peut donc
+        // saisir son numéro au format local (ex : 73000004 au lieu de +22673000004).
+        $chiffres = preg_replace('/\D+/', '', (string) $identifiant);
+
         $user = User::where('telephone', $identifiant)
             ->orWhereRaw('LOWER(email) = ?', [strtolower($identifiant)])
+            ->when(strlen($chiffres) >= 8, function ($q) use ($chiffres) {
+                $q->orWhereRaw(
+                    'RIGHT(REPLACE(REPLACE(REPLACE(telephone, "+", ""), " ", ""), "-", ""), 8) = ?',
+                    [substr($chiffres, -8)]
+                );
+            })
             ->first();
 
         // Vérifier que l'utilisateur existe et que le mot de passe est correct
@@ -156,6 +178,7 @@ class AuthController extends Controller
                 'id'          => $user->id,
                 'nom_complet' => $user->nom_complet,
                 'role'        => $user->role->nom,
+                'permissions' => $user->nomsPermissions(),
                 'telephone'   => $user->telephone,
             ],
         ]);
@@ -177,6 +200,7 @@ class AuthController extends Controller
                 'id'          => $user->id,
                 'nom_complet' => $user->nom_complet,
                 'role'        => $user->role->nom,
+                'permissions' => $user->nomsPermissions(),
                 'telephone'   => $user->telephone,
                 'email'       => $user->email,
                 'est_valide'  => $user->est_valide,

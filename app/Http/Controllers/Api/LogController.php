@@ -43,7 +43,7 @@ class LogController extends Controller
             $query->where('description', 'like', '%' . $request->search . '%');
         }
 
-        $logs = $query->paginate(25);
+        $logs = $query->paginate(10);
 
         return response()->json($logs);
     }

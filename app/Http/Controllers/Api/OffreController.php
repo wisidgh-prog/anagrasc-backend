@@ -4,8 +4,10 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\AppLog;
+use App\Models\Configuration;
 use App\Models\Offre;
 use App\Models\SessionEnchere;
+use App\Services\AdjudicationService;
 use App\Services\WalletService;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
@@ -15,7 +17,10 @@ class OffreController extends Controller
 {
     // Le WalletService est injecté automatiquement par Laravel (injection de dépendances)
     // On en a besoin pour prélever la caution lors de la première offre
-    public function __construct(private WalletService $walletService) {}
+    public function __construct(
+        private WalletService $walletService,
+        private AdjudicationService $adjudicationService
+    ) {}
 
     /**
      * GET /api/sessions/{session}/offres
@@ -176,6 +181,8 @@ class OffreController extends Controller
      */
     public function mesParticipations(Request $request)
     {
+        $this->adjudicationService->cloturerExpirees();
+
         $encherisseur = $request->user()->encherisseur;
 
         if (!$encherisseur) {
@@ -185,6 +192,7 @@ class OffreController extends Controller
         // Récupérer toutes les offres de cet enchérisseur avec les infos de session et de bien
         $toutesLesOffres = Offre::with([
                 'session.bien:id,titre',
+                'session.offreGagnante',
             ])
             ->where('encherisseur_id', $encherisseur->id)
             ->orderByDesc('created_at')
@@ -206,11 +214,31 @@ class OffreController extends Controller
                     ->where('session_id', $sessionId)
                     ->max('montant');
 
+                $session = $offre->session;
+                $gagnant = $session->offreGagnante;
+                $jeSuisGagnant = $gagnant
+                    && (int) $gagnant->encherisseur_id === (int) $encherisseur->id;
+
+                // Montant restant à régler (prix adjugé + frais − caution), uniquement
+                // pour le gagnant d'une session non encore payée.
+                $montantAPayer = null;
+                if ($jeSuisGagnant && !$session->paiement_effectue_le) {
+                    $prix    = (float) $gagnant->montant;
+                    $taux    = (float) Configuration::valeur('taux_frais_adjudication', 8);
+                    $frais   = round($prix * $taux / 100, 2);
+                    $caution = $session->getCautionRequise();
+                    $montantAPayer = max(0, round($prix + $frais - $caution, 2));
+                }
+
                 $participations[] = [
                     'session_id'         => $sessionId,
-                    'bien'               => $offre->session->bien->titre ?? '',
-                    'statut'             => $offre->session->statut ?? '',
+                    'bien'               => $session->bien->titre ?? '',
+                    'statut'             => $session->statut ?? '',
+                    'date_fin'           => $session->date_fin,
                     'ma_meilleure_offre' => (float) $meilleureOffre,
+                    'je_suis_gagnant'    => $jeSuisGagnant,
+                    'paiement_effectue'  => (bool) $session->paiement_effectue_le,
+                    'montant_a_payer'    => $montantAPayer,
                 ];
             }
         }

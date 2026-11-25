@@ -57,7 +57,7 @@ class WalletController extends Controller
 
         $transactions = Transaction::where('encherisseur_id', $user->encherisseur->id)
             ->orderByDesc('created_at')
-            ->paginate(15);
+            ->paginate(10);
 
         return response()->json($transactions);
     }

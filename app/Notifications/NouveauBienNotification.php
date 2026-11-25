@@ -4,10 +4,11 @@ namespace App\Notifications;
 
 use App\Models\Bien;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Notifications\Messages\MailMessage;
 use Illuminate\Notifications\Notification;
 
-class NouveauBienNotification extends Notification
+class NouveauBienNotification extends Notification implements ShouldQueue
 {
     use Queueable;
 

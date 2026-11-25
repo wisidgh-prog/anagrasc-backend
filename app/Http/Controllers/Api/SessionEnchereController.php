@@ -5,18 +5,40 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\AppLog;
 use App\Models\Bien;
+use App\Models\Configuration;
 use App\Models\SessionEnchere;
+use App\Models\Transaction;
+use App\Services\AdjudicationService;
+use App\Services\WalletService;
+use App\Services\NotificationInAppService;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 
 class SessionEnchereController extends Controller
 {
+    public function __construct(
+        private AdjudicationService $adjudicationService,
+        private NotificationInAppService $notifications
+    ) {}
+
+    /**
+     * Clôture les sessions dont la date de fin est dépassée avant tout affichage,
+     * pour que l'historique et la page live reflètent toujours la réalité.
+     */
+    private function cloturerSessionsExpirees(): void
+    {
+        $this->adjudicationService->cloturerExpirees();
+    }
+
     /**
      * GET /api/ventes-passees
      * Public – Historique paginé des enchères terminées.
      */
     public function historique(Request $request)
     {
+        $this->cloturerSessionsExpirees();
+
         $query = SessionEnchere::where('statut', SessionEnchere::STATUT_TERMINEE)
             ->with([
                 'bien:id,titre,categorie_id',
@@ -43,7 +65,7 @@ class SessionEnchereController extends Controller
             $query->whereDate('date_fin', '<=', $request->date_fin);
         }
 
-        $sessions = $query->paginate(15);
+        $sessions = $query->paginate(10);
 
         return response()->json($sessions);
     }
@@ -55,6 +77,8 @@ class SessionEnchereController extends Controller
      */
     public function show(SessionEnchere $session)
     {
+        $this->cloturerSessionsExpirees();
+
         $session->load([
             'bien.categorie',
             'bien.photos',
@@ -230,6 +254,18 @@ class SessionEnchereController extends Controller
             'horodatage'  => now(),
         ]);
 
+        // Notifier le superviseur affecté (s'il y en a un)
+        if ($session->superviseur_id) {
+            $this->notifications->envoyer(
+                $session->superviseur,
+                'Nouvelle session affectée',
+                "Vous êtes affecté à la session #{$session->id} ({$session->bien->titre}).",
+                '/superviseur',
+                'sensors',
+                'session'
+            );
+        }
+
         return response()->json([
             'message' => 'Session créée.',
             'data'    => $session->load('bien'),
@@ -320,6 +356,18 @@ public function verifierDisponibilite(SessionEnchere $session): bool
             'horodatage'  => now(),
         ]);
 
+        // Prévenir le superviseur affecté
+        if ($session->superviseur_id) {
+            $this->notifications->envoyer(
+                $session->superviseur,
+                'Session suspendue',
+                "La session #{$session->id} a été interrompue.",
+                '/superviseur',
+                'pause_circle',
+                'session'
+            );
+        }
+
         return response()->json(['message' => 'Enchère suspendue.']);
     }
 
@@ -347,6 +395,18 @@ public function verifierDisponibilite(SessionEnchere $session): bool
             'description' => "Session #{$session->id} reprise",
             'horodatage'  => now(),
         ]);
+
+        // Prévenir le superviseur affecté
+        if ($session->superviseur_id) {
+            $this->notifications->envoyer(
+                $session->superviseur,
+                'Session reprise',
+                "La session #{$session->id} a été reprise.",
+                '/superviseur',
+                'play_circle',
+                'session'
+            );
+        }
 
         return response()->json(['message' => 'Enchère reprise.']);
     }
@@ -431,6 +491,103 @@ public function verifierDisponibilite(SessionEnchere $session): bool
                 'historique_offres'   => $historiqueOffres,
                 'participants'        => $participants,
             ],
+        ]);
+    }
+
+    /**
+     * POST /api/sessions/{session}/payer
+     * auth:sanctum + role:encherisseur (validé)
+     *
+     * Le gagnant règle le prix adjugé + les frais d'adjudication depuis son wallet.
+     * Règle métier (CDC) : total = prix adjugé + 8% de frais − caution déjà versée.
+     * Enregistre `paiement_effectue_le` (empêche la relance/la pénalité) et marque le bien "vendu".
+     */
+    public function payer(Request $request, SessionEnchere $session, WalletService $walletService)
+    {
+        $encherisseur = $request->user()->encherisseur;
+
+        if (!$encherisseur) {
+            return response()->json(['message' => 'Profil enchérisseur introuvable.'], 403);
+        }
+
+        // La session doit être terminée et avoir un gagnant
+        if ($session->statut !== SessionEnchere::STATUT_TERMINEE || !$session->offre_gagnante_id) {
+            return response()->json(['message' => 'Aucun paiement n\'est attendu pour cette session.'], 422);
+        }
+
+        $offreGagnante = $session->offreGagnante;
+
+        // Seul le gagnant peut régler cette session
+        if (!$offreGagnante || $offreGagnante->encherisseur_id !== $encherisseur->id) {
+            return response()->json(['message' => 'Vous n\'êtes pas le gagnant de cette session.'], 403);
+        }
+
+        if ($session->paiement_effectue_le) {
+            return response()->json(['message' => 'Le paiement a déjà été effectué.'], 422);
+        }
+
+        // Montant dû : prix adjugé + frais d'adjudication (%) − caution déjà prélevée
+        $prix    = (float) $offreGagnante->montant;
+        $taux    = (float) Configuration::valeur('taux_frais_adjudication', 8);
+        $frais   = round($prix * $taux / 100, 2);
+        $caution = $session->getCautionRequise();
+        $total   = max(0, round($prix + $frais - $caution, 2));
+
+        try {
+            $resultat = DB::transaction(function () use ($session, $encherisseur, $prix, $frais, $caution, $total, $request, $walletService) {
+                // Revérifier sous verrou (idempotence : ne pas débiter deux fois)
+                $session = SessionEnchere::whereKey($session->id)->lockForUpdate()->firstOrFail();
+
+                if ($session->paiement_effectue_le) {
+                    return ['erreur' => 422, 'message' => 'Le paiement a déjà été effectué.'];
+                }
+
+                $transaction = $walletService->debiter(
+                    $encherisseur,
+                    $total,
+                    Transaction::TYPE_PAIEMENT_FINAL,
+                    $session->id
+                );
+
+                $session->update(['paiement_effectue_le' => now()]);
+
+                // Le bien devient vendu
+                $session->bien->update(['statut' => 'vendu']);
+
+                AppLog::create([
+                    'user_id'     => $request->user()->id,
+                    'action'      => 'paiement_final',
+                    'description' => "Paiement final de {$total} FCFA (prix {$prix} + frais {$frais} - caution {$caution}) pour la session #{$session->id}",
+                    'horodatage'  => now(),
+                ]);
+
+                return ['transaction' => $transaction];
+            });
+        } catch (\Exception $e) {
+            return response()->json(['message' => $e->getMessage()], 422);
+        }
+
+        if (isset($resultat['erreur'])) {
+            return response()->json(['message' => $resultat['message']], $resultat['erreur']);
+        }
+
+        // Prévenir le commissaire propriétaire du paiement final
+        $this->notifications->envoyer(
+            $session->commissaire,
+            'Paiement final reçu',
+            "Le gagnant a réglé {$total} FCFA pour la session #{$session->id}.",
+            '/commissaire/sessions',
+            'payments',
+            'paiement'
+        );
+
+        return response()->json([
+            'message'    => 'Paiement effectué.',
+            'prix'       => $prix,
+            'frais'      => $frais,
+            'caution'    => $caution,
+            'total'      => $total,
+            'reference'  => $resultat['transaction']->id,
         ]);
     }
 }

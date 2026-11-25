@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\Permission;
 use App\Models\Role;
 use Illuminate\Http\Request;
 
@@ -17,6 +18,17 @@ class RoleController extends Controller
         $roles = Role::with('permissions')->get();
 
         return response()->json(['data' => $roles]);
+    }
+
+    /**
+     * GET /api/permissions
+     * Liste toutes les permissions disponibles (pour la gestion des rôles).
+     */
+    public function permissions()
+    {
+        $permissions = Permission::orderBy('id')->get();
+
+        return response()->json(['data' => $permissions]);
     }
 
     /**
@@ -68,6 +80,18 @@ class RoleController extends Controller
      */
     public function destroy(Role $role)
     {
+        // Sécurité : ne jamais supprimer le rôle administrateur ni un rôle encore
+        // attribué à des utilisateurs (sinon leurs accès sont cassés).
+        if ($role->nom === 'administrateur') {
+            return response()->json(['message' => 'Le rôle administrateur ne peut pas être supprimé.'], 422);
+        }
+
+        if ($role->users()->exists()) {
+            return response()->json(['message' => 'Ce rôle est attribué à des utilisateurs ; réaffectez-les d\'abord.'], 422);
+        }
+
+        // La table pivot n'a pas de clé étrangère (moteur MyISAM) : on la nettoie.
+        $role->permissions()->detach();
         $role->delete();
 
         return response()->json(['message' => 'Rôle supprimé.']);
@@ -80,6 +104,14 @@ class RoleController extends Controller
      */
     public function syncPermissions(Request $request, Role $role)
     {
+        // Le rôle administrateur est super-utilisateur : il doit conserver
+        // toutes les permissions (sinon l'admin peut se verrouiller lui-même).
+        if ($role->nom === 'administrateur') {
+            return response()->json([
+                'message' => 'Le rôle administrateur conserve automatiquement toutes les permissions.',
+            ], 422);
+        }
+
         // $request->input('permissions', []) retourne le tableau envoyé, ou un tableau vide par défaut
         $permissions = $request->input('permissions', []);
 

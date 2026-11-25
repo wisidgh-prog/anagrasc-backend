@@ -6,11 +6,15 @@ use App\Http\Controllers\Controller;
 use App\Models\Bien;
 use App\Models\AppLog;
 use App\Services\NotificationService;
+use App\Services\NotificationInAppService;
 use Illuminate\Http\Request;
 
 class BienController extends Controller
 {
-    public function __construct(private NotificationService $notificationService) {}
+    public function __construct(
+        private NotificationService $notificationService,
+        private NotificationInAppService $notifications
+    ) {}
     /*
     |--------------------------------------------------------------------------
     | Consultation publique du catalogue
@@ -25,10 +29,18 @@ class BienController extends Controller
     {
         // On ne montre que les biens publiés ou en cours d'enchère au public
         $query = Bien::whereIn('statut', [Bien::STATUT_PUBLIE, Bien::STATUT_EN_COURS])
-            ->with(['categorie', 'photos' => function ($q) {
+            ->with([
+                'categorie',
                 // On ne charge que la première photo (la photo principale)
-                $q->orderBy('ordre')->limit(1);
-            }])
+                'photos' => function ($q) {
+                    $q->orderBy('ordre')->limit(1);
+                },
+                // Sessions à venir / en cours : le catalogue s'en sert pour
+                // construire le bouton "Enchérir" (lien /encheres/{session_id}/live).
+                'sessions' => function ($q) {
+                    $q->whereIn('statut', ['a_venir', 'en_cours'])->orderBy('date_debut');
+                },
+            ])
             ->orderByDesc('created_at');
 
         // Filtre par mot-clé dans le titre ou la description
@@ -98,7 +110,7 @@ class BienController extends Controller
             $query->where('statut', $request->statut);
         }
 
-        $biens = $query->paginate(15);
+        $biens = $query->paginate(10);
 
         return response()->json($biens);
     }
@@ -152,6 +164,15 @@ class BienController extends Controller
             'description' => "Bien #{$bien->id} '{$bien->titre}' créé",
             'horodatage'  => now(),
         ]);
+
+        // Notifier les administrateurs qu'un bien attend une validation
+        $this->notifications->auxAdmins(
+            'Nouveau bien à valider',
+            "Le bien '{$bien->titre}' a été soumis pour validation.",
+            '/admin/gestion-biens',
+            'inventory_2',
+            'bien'
+        );
 
         return response()->json([
             'message' => 'Bien créé et soumis pour validation.',
@@ -297,7 +318,13 @@ class BienController extends Controller
      */
     public function indexAdmin(Request $request)
     {
-        $query = Bien::with(['categorie', 'createur:id,nom,prenom'])
+        $query = Bien::with([
+                'categorie',
+                'createur:id,nom,prenom',
+                // Sessions du bien (pour le téléchargement du compte rendu PDF)
+                'sessions' => fn ($q) => $q->orderByDesc('date_fin'),
+                'sessions.offreGagnante',
+            ])
             ->orderByDesc('created_at');
 
         // Filtre par statut si demandé
@@ -305,7 +332,7 @@ class BienController extends Controller
             $query->where('statut', $request->statut);
         }
 
-        $biens = $query->paginate(15);
+        $biens = $query->paginate(10);
 
         return response()->json($biens);
     }
@@ -333,6 +360,16 @@ class BienController extends Controller
             'description' => "Bien #{$bien->id} '{$bien->titre}' validé et publié",
             'horodatage'  => now(),
         ]);
+
+        // Notifier le commissaire créateur de la publication
+        $this->notifications->envoyer(
+            $bien->createur,
+            'Bien publié',
+            "Votre bien '{$bien->titre}' a été validé et est désormais publié au catalogue.",
+            '/commissaire/biens',
+            'check_circle',
+            'bien'
+        );
 
         return response()->json(['message' => 'Bien validé et publié.']);
     }
@@ -365,6 +402,16 @@ class BienController extends Controller
             'description' => "Bien #{$bien->id} '{$bien->titre}' rejeté. Motif : {$request->motif}",
             'horodatage'  => now(),
         ]);
+
+        // Notifier le commissaire créateur du rejet
+        $this->notifications->envoyer(
+            $bien->createur,
+            'Bien rejeté',
+            "Votre bien '{$bien->titre}' a été rejeté. Motif : {$request->motif}",
+            '/commissaire/biens',
+            'cancel',
+            'bien'
+        );
 
         return response()->json(['message' => 'Bien rejeté.']);
     }

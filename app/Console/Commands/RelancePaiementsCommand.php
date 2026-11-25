@@ -61,12 +61,25 @@ class RelancePaiementsCommand extends Command
                 'description'     => 'Caution perdue - défaillance paiement',
             ]);
 
-            // Proposer au second si offre >= prix de réserve
+            // Proposer au second si offre >= prix de réserve.
+            // On exclut les enchérisseurs déjà pénalisés sur cette session, sinon un
+            // gagnant défaillant (dont on vient de retirer le drapeau 'est_gagnante')
+            // serait re-proposé indéfiniment.
+            $dejaPenalises = Transaction::where('session_id', $session->id)
+                ->where('type', Transaction::TYPE_PENALITE)
+                ->pluck('encherisseur_id');
+
             $second = \App\Models\Offre::where('session_id', $session->id)
                 ->where('est_gagnante', false)
+                ->whereNotIn('encherisseur_id', $dejaPenalises)
                 ->where('montant', '>=', $session->prix_reserve ?? 0)
                 ->orderByDesc('montant')
                 ->first();
+
+            // Le gagnant défaillant n'est plus l'offre retenue : on retire son
+            // marquage, sinon deux offres resteraient 'est_gagnante' (le compte
+            // rendu, qui se base sur ce drapeau, désignerait le mauvais gagnant).
+            $offre->update(['est_gagnante' => false, 'rang' => null]);
 
             if ($second) {
                 $second->update(['est_gagnante' => true, 'rang' => 1]);
@@ -74,6 +87,7 @@ class RelancePaiementsCommand extends Command
 
                 $this->log->enregistrer(null, 'report_gagnant', "Report au second - session #{$session->id}");
             } else {
+                $session->update(['offre_gagnante_id' => null]);
                 $session->bien->update(['statut' => 'publie']);
                 $this->log->enregistrer(null, 'remise_en_vente', "Bien remis en vente - session #{$session->id}");
             }

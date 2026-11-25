@@ -4,6 +4,7 @@ namespace App\Notifications;
 
 use App\Models\SessionEnchere;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Notifications\Messages\MailMessage;
 use Illuminate\Notifications\Notification;
 
@@ -11,7 +12,7 @@ use Illuminate\Notifications\Notification;
  * Notification informant les participants qu'une enchère a été reportée
  * et qu'une nouvelle session a été programmée pour le même bien.
  */
-class SessionReporteeNotification extends Notification
+class SessionReporteeNotification extends Notification implements ShouldQueue
 {
     use Queueable;
 

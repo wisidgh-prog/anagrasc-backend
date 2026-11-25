@@ -64,19 +64,40 @@ class WalletService
 
     /**
      * Rembourser la caution au perdant.
+     *
+     * Idempotent : une caution n'est créditée qu'une seule fois par session.
+     * Si la session est rejouée (double clôture, incident après clôture), on
+     * renvoie la transaction déjà existante sans recréditer le wallet.
      */
     public function rembourser(Encherisseur $encherisseur, float $montant, ?int $sessionId = null): Transaction
     {
-        $wallet = $encherisseur->wallet;
-        $wallet->increment('solde', $montant);
+        return DB::transaction(function () use ($encherisseur, $montant, $sessionId) {
+            $wallet = Wallet::where('encherisseur_id', $encherisseur->id)
+                ->lockForUpdate()
+                ->firstOrFail();
 
-        return Transaction::create([
-            'encherisseur_id' => $encherisseur->id,
-            'session_id'      => $sessionId,
-            'type'            => Transaction::TYPE_REMBOURSEMENT_CAUTION,
-            'montant'         => $montant,
-            'statut'          => 'ok',
-            'description'     => 'Remboursement caution',
-        ]);
+            if ($sessionId !== null) {
+                $existant = Transaction::where('encherisseur_id', $encherisseur->id)
+                    ->where('session_id', $sessionId)
+                    ->where('type', Transaction::TYPE_REMBOURSEMENT_CAUTION)
+                    ->first();
+
+                if ($existant) {
+                    return $existant;
+                }
+            }
+
+            $wallet->increment('solde', $montant);
+            $wallet->update(['date_derniere_operation' => now()]);
+
+            return Transaction::create([
+                'encherisseur_id' => $encherisseur->id,
+                'session_id'      => $sessionId,
+                'type'            => Transaction::TYPE_REMBOURSEMENT_CAUTION,
+                'montant'         => $montant,
+                'statut'          => 'ok',
+                'description'     => 'Remboursement caution',
+            ]);
+        });
     }
 }

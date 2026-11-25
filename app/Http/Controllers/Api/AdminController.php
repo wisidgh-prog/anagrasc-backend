@@ -7,10 +7,12 @@ use App\Models\User;
 use App\Models\Role;
 use App\Models\Bien;
 use App\Http\Controllers\Api\LogController;
+use App\Services\NotificationInAppService;
 use Illuminate\Http\Request;
 
 class AdminController extends Controller
 {
+    public function __construct(private NotificationInAppService $notifications) {}
     /**
      * GET /api/utilisateurs
      * auth:sanctum + role:administrateur
@@ -33,6 +35,16 @@ class AdminController extends Controller
             $query->where('est_valide', $request->boolean('est_valide'));
         }
 
+        // Filtre par statut consolidé (?statut=tous|attente|valides|suspendus)
+        if ($request->filled('statut') && $request->statut !== 'tous') {
+            match ($request->statut) {
+                'valides'   => $query->where('est_valide', true)->where('est_suspendu', false),
+                'attente'   => $query->where('est_valide', false)->where('est_suspendu', false),
+                'suspendus' => $query->where('est_suspendu', true),
+                default     => null,
+            };
+        }
+
         // Filtre par recherche texte (?search=dupont)
         if ($request->filled('search')) {
             $search = $request->search;
@@ -45,7 +57,7 @@ class AdminController extends Controller
             });
         }
 
-        $users = $query->paginate(20);
+        $users = $query->paginate(10);
 
         return response()->json($users);
     }
@@ -63,15 +75,34 @@ class AdminController extends Controller
         }
 
         // Valider le compte
-        $user->update([
+        // forceFill : est_valide / est_suspendu / valide_le / valide_par ne sont
+        // pas dans $fillable (champs privilégiés) → un simple update() les ignorerait.
+        $user->forceFill([
             'est_valide' => true,
             'est_suspendu' => false,
             'valide_le'  => now(),
             'valide_par' => $request->user()->id,
-        ]);
+        ])->save();
 
-        // Envoyer la notification de validation
-        $user->notify(new CompteActive($user));
+        // Envoyer la notification de validation (ne doit jamais bloquer la validation)
+        try {
+            $user->notify(new CompteActive($user));
+        } catch (\Throwable $e) {
+            LogController::log(
+                'validation_compte',
+                "Échec de l'envoi de l'email d'activation au compte #{$user->id} : {$e->getMessage()}"
+            );
+        }
+
+        // Notification interne : informer l'utilisateur que son compte est validé
+        $this->notifications->envoyer(
+            $user,
+            'Compte validé',
+            'Votre compte enchérisseur a été validé. Vous pouvez désormais participer aux enchères.',
+            '/mon-espace',
+            'check_circle',
+            'compte'
+        );
 
         //enregister la validation dans les logs
        LogController::log(
@@ -129,11 +160,13 @@ class AdminController extends Controller
             return response()->json(['message' => 'Impossible de suspendre un administrateur.'], 422);
         }
 
-        // Suspendre le compte
-        $user->update([
+        // Suspendre le compte et révoquer tous ses tokens actifs
+        $user->forceFill([
             'est_suspendu' => true,
             'est_valide'   => false,
-        ]);
+        ])->save();
+
+        $user->tokens()->delete();
 
         // Log
      LogController::log(
@@ -167,16 +200,20 @@ class AdminController extends Controller
         $role = Role::where('nom', $validated['role'])->firstOrFail();
 
         // Créer le compte interne (déjà validé par défaut)
-        $user = User::create([
-            'role_id'       => $role->id,
+        $user = new User([
             'type_personne' => null,
             'nom'           => $validated['nom'],
             'prenom'        => $validated['prenom'],
             'telephone'     => $validated['telephone'],
             'email'         => $validated['email'],
             'password'      => bcrypt($validated['password']),
-            'est_valide'    => true,
         ]);
+
+        // Champs privilégiés définis uniquement côté serveur (jamais assignables en masse)
+        $user->forceFill([
+            'role_id'    => $role->id,
+            'est_valide' => true,
+        ])->save();
 
         // Log
         LogController::log(

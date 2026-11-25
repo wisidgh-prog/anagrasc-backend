@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Bien;
+use App\Models\Configuration;
 use App\Models\Incident;
 use App\Models\SessionEnchere;
 use App\Models\Transaction;
@@ -38,17 +39,8 @@ class DashboardController extends Controller
         ->where('est_suspendu', false)
         ->count();
 
-        // Total des recettes du mois en cours (paiements finaux)
-        $recettes_du_mois = Transaction::where('type', 'paiement_final')
-            ->whereMonth('created_at', now()->month)
-            ->sum('montant');
-
-        // Total des cautions actuellement bloquées (sessions non terminées)
-        $cautions_bloquees = Transaction::where('type', 'prelevement_caution')
-            ->whereHas('session', function ($q) {
-                $q->whereIn('statut', ['a_venir', 'en_cours', 'interrompue']);
-            })
-            ->sum('montant');
+        // Synthèse financière globale (le détail mensuel est sur la page Finance)
+        $finance = $this->financeGenerale();
 
         // Les 5 dernières sessions créées (pour le résumé rapide)
         $dernieres_sessions = SessionEnchere::with('bien:id,titre')
@@ -62,11 +54,141 @@ class DashboardController extends Controller
                 'encheres_a_venir'    => $encheres_a_venir,
                 'encherisseurs_total' => $encherisseurs_total,
                 'comptes_en_attente'  => $comptes_en_attente,
-                'recettes_du_mois'    => abs($recettes_du_mois),
-                'cautions_bloquees'   => abs($cautions_bloquees),
+                'finance'             => $finance,
                 'dernieres_sessions'  => $dernieres_sessions,
             ],
         ]);
+    }
+
+    /**
+     * GET /api/admin/finance
+     * auth:sanctum + role:administrateur
+     * Détail financier mois par mois + totaux généraux.
+     */
+    public function finance()
+    {
+        $tauxFrais = (float) Configuration::valeur('taux_frais_adjudication', 8);
+
+        // Adjudications groupées par mois (mois de la date de fin de session)
+        $adjudications = SessionEnchere::where('statut', SessionEnchere::STATUT_TERMINEE)
+            ->whereNotNull('offre_gagnante_id')
+            ->with('offreGagnante:id,montant')
+            ->get(['id', 'date_fin', 'offre_gagnante_id'])
+            ->groupBy(fn ($s) => $s->date_fin ? $s->date_fin->format('Y-m') : 'inconnu')
+            ->map(function ($groupe) use ($tauxFrais) {
+                $montant = (float) $groupe->sum(fn ($s) => (float) ($s->offreGagnante?->montant ?? 0));
+                return [
+                    'montants_adjuges'   => round($montant, 2),
+                    'frais_adjudication' => round($montant * $tauxFrais / 100, 2),
+                ];
+            });
+
+        // Transactions groupées par mois selon leur type
+        $parMoisTransaction = function (string $type) {
+            return Transaction::where('type', $type)
+                ->get(['montant', 'created_at'])
+                ->groupBy(fn ($t) => $t->created_at ? $t->created_at->format('Y-m') : 'inconnu')
+                ->map(fn ($rows) => round((float) $rows->sum('montant'), 2));
+        };
+
+        $paiements           = $parMoisTransaction(Transaction::TYPE_PAIEMENT_FINAL);
+        $cautionsPrelevees   = $parMoisTransaction(Transaction::TYPE_PRELEVEMENT_CAUTION);
+        $cautionsRemboursees = $parMoisTransaction(Transaction::TYPE_REMBOURSEMENT_CAUTION);
+
+        // Union de tous les mois ayant une activité, du plus récent au plus ancien
+        $mois = collect()
+            ->merge($adjudications->keys())
+            ->merge($paiements->keys())
+            ->merge($cautionsPrelevees->keys())
+            ->merge($cautionsRemboursees->keys())
+            ->reject(fn ($m) => $m === 'inconnu')
+            ->unique()
+            ->sortDesc()
+            ->values();
+
+        $parMois = $mois->map(function ($ym) use ($adjudications, $paiements, $cautionsPrelevees, $cautionsRemboursees) {
+            $adj  = $adjudications->get($ym, ['montants_adjuges' => 0, 'frais_adjudication' => 0]);
+            $date = \Illuminate\Support\Carbon::parse($ym . '-01');
+
+            return [
+                'mois'                 => $ym,
+                'libelle'              => $this->libelleMois($date),
+                'montants_adjuges'     => abs($adj['montants_adjuges']),
+                'frais_adjudication'   => abs($adj['frais_adjudication']),
+                'paiements_finaux'     => abs((float) $paiements->get($ym, 0)),
+                'cautions_prelevees'   => abs((float) $cautionsPrelevees->get($ym, 0)),
+                'cautions_remboursees' => abs((float) $cautionsRemboursees->get($ym, 0)),
+            ];
+        })->values();
+
+        return response()->json([
+            'data' => [
+                'par_mois' => $parMois,
+                'general'  => $this->financeGenerale(),
+            ],
+        ]);
+    }
+
+    /**
+     * Totaux financiers généraux (toutes périodes confondues).
+     */
+    private function financeGenerale(): array
+    {
+        $tauxFrais = (float) Configuration::valeur('taux_frais_adjudication', 8);
+
+        $montantsAdjuges = (float) SessionEnchere::where('statut', SessionEnchere::STATUT_TERMINEE)
+            ->whereNotNull('offre_gagnante_id')
+            ->with('offreGagnante:id,montant')
+            ->get()
+            ->sum(fn ($s) => (float) ($s->offreGagnante?->montant ?? 0));
+
+        return [
+            'montants_adjuges'     => abs($montantsAdjuges),
+            'frais_adjudication'   => abs(round($montantsAdjuges * $tauxFrais / 100, 2)),
+            'paiements_finaux'     => abs((float) Transaction::where('type', Transaction::TYPE_PAIEMENT_FINAL)->sum('montant')),
+            'cautions_prelevees'   => abs((float) Transaction::where('type', Transaction::TYPE_PRELEVEMENT_CAUTION)->sum('montant')),
+            'cautions_remboursees' => abs((float) Transaction::where('type', Transaction::TYPE_REMBOURSEMENT_CAUTION)->sum('montant')),
+            'cautions_bloquees'    => $this->cautionsBloquees(),
+        ];
+    }
+
+    /**
+     * Montant des cautions actuellement bloquées :
+     * - participations de sessions encore ouvertes (à venir / en cours / interrompues)
+     * - caution du gagnant de sessions terminées mais non encore réglées
+     */
+    private function cautionsBloquees(): float
+    {
+        $actives = (float) Transaction::where('type', Transaction::TYPE_PRELEVEMENT_CAUTION)
+            ->whereHas('session', function ($q) {
+                $q->whereIn('statut', [
+                    SessionEnchere::STATUT_A_VENIR,
+                    SessionEnchere::STATUT_EN_COURS,
+                    SessionEnchere::STATUT_INTERROMPUE,
+                ]);
+            })
+            ->sum('montant');
+
+        $gagnantsImpayes = (float) SessionEnchere::where('statut', SessionEnchere::STATUT_TERMINEE)
+            ->whereNull('paiement_effectue_le')
+            ->whereNotNull('offre_gagnante_id')
+            ->get()
+            ->sum(fn ($s) => $s->getCautionRequise());
+
+        return abs($actives) + $gagnantsImpayes;
+    }
+
+    /**
+     * Libellé français du mois d'une date (ex. "octobre 2026"), sans dépendre de la locale Carbon.
+     */
+    private function libelleMois(\DateTimeInterface $date): string
+    {
+        $mois = [
+            1 => 'janvier', 'février', 'mars', 'avril', 'mai', 'juin',
+            'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre',
+        ];
+
+        return $mois[(int) $date->format('n')] . ' ' . $date->format('Y');
     }
 
     /**

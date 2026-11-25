@@ -16,15 +16,22 @@ return Application::configure(basePath: dirname(__DIR__))
             \Laravel\Sanctum\Http\Middleware\EnsureFrontendRequestsAreStateful::class,
         ]);
 
+        // API sans page de connexion : on n'a jamais de redirection "guests"
+        // (sinon route('login') lève une exception avant le rendu JSON).
+        $middleware->redirectGuestsTo(fn () => null);
+
         // Alias pour les middlewares (optionnel, mais on les garde)
         $middleware->alias([
             'role' => \App\Http\Middleware\CheckRole::class,
+            'permission' => \App\Http\Middleware\CheckPermission::class,
             'encherisseur.valide' => \App\Http\Middleware\CheckEncherisseurValide::class,
         ]);
 
-        // FORCE la réponse JSON pour les utilisateurs non authentifiés
-        $middleware->redirectGuestsTo(fn () => response()->json(['message' => 'Non authentifié.'], 401));
     })
     ->withExceptions(function (Exceptions $exceptions) {
-        //
+        // L'API ne doit jamais tenter de rediriger vers une page web
+        // (aucune route "login" n'existe) : toutes les routes /api/* répondent en JSON.
+        $exceptions->shouldRenderJsonWhen(
+            fn ($request, $e) => $request->is('api/*') || $request->expectsJson()
+        );
     })->create();

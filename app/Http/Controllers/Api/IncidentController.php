@@ -9,6 +9,7 @@ use App\Models\Incident;
 use App\Models\Offre;
 use App\Models\SessionEnchere;
 use App\Services\NotificationService;
+use App\Services\NotificationInAppService;
 use App\Services\WalletService;
 use Illuminate\Http\Request;
 
@@ -16,7 +17,8 @@ class IncidentController extends Controller
 {
     public function __construct(
         private NotificationService $notificationService,
-        private WalletService $walletService
+        private WalletService $walletService,
+        private NotificationInAppService $notifications
     ) {}
 
     /**
@@ -87,6 +89,16 @@ class IncidentController extends Controller
             'horodatage'  => now(),
         ]);
 
+        // Notifier le commissaire propriétaire de la session
+        $this->notifications->envoyer(
+            $session->commissaire,
+            'Nouvel incident signalé',
+            "Un incident '{$request->type_incident}' a été signalé sur la session #{$session->id}.",
+            '/commissaire/incidents',
+            'warning',
+            'incident'
+        );
+
         return response()->json([
             'message' => 'Incident signalé au commissaire-priseur.',
             'data'    => $incident,
@@ -116,7 +128,7 @@ class IncidentController extends Controller
             $query->where('statut', $request->statut);
         }
 
-        $incidents = $query->paginate(15);
+        $incidents = $query->paginate(10);
 
         return response()->json($incidents);
     }
@@ -215,6 +227,18 @@ class IncidentController extends Controller
             // Ajouter l'ID de la nouvelle session dans la note de décision
             $incident->note_decision = ($incident->note_decision ?? '') . "\nNouvelle session créée : ID {$nouvelleSession->id}";
             $incident->save();
+        }
+
+        // Notifier le superviseur affecté de la décision prise
+        if ($session->superviseur_id) {
+            $this->notifications->envoyer(
+                $session->superviseur,
+                'Décision sur incident',
+                "L'incident #{$incident->id} a été traité (décision : {$request->decision}).",
+                '/superviseur',
+                'gavel',
+                'incident'
+            );
         }
 
         return response()->json([

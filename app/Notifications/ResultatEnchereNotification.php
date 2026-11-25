@@ -4,6 +4,7 @@ namespace App\Notifications;
 
 use App\Models\SessionEnchere;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Notifications\Messages\MailMessage;
 use Illuminate\Notifications\Notification;
 
@@ -11,7 +12,7 @@ use Illuminate\Notifications\Notification;
  * Notification envoyée aux participants à la clôture d'une enchère.
  * Le même message s'adapte au cas (gagnant ou non retenu).
  */
-class ResultatEnchereNotification extends Notification
+class ResultatEnchereNotification extends Notification implements ShouldQueue
 {
     use Queueable;
 
